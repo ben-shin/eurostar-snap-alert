@@ -26,7 +26,7 @@ checks:
 normal_eurostar:
   # Notify when a normal one-way Eurostar fare is <= this numeric amount in either GBP or EUR.
   # This intentionally does not do FX conversion; it treats £70 and €70 as threshold hits.
-  threshold_amount: 100
+  threshold_amount: 170
   allowed_currencies: ["GBP", "EUR"]
 
 routes:
