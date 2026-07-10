@@ -51,6 +51,14 @@ jobs:
         run: |
           python -m eurostar_alerts.main --config config.yml
 
+      - name: Upload debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eurostar-debug
+          path: debug/
+          if-no-files-found: ignore
+
       - name: Commit notification state
         run: |
           git config user.name "github-actions"
