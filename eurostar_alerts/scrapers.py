@@ -272,6 +272,48 @@ def click_calendar_next(page: Page, scope: Optional[Locator] = None) -> bool:
 
     return False
 
+def click_locator_or_clickable_parent(item: Locator, page: Page, iso: str) -> bool:
+    """
+    Calendar dates are sometimes rendered as spans/divs inside clickable wrappers,
+    not as direct buttons. Try normal click, force click, then JS-click the nearest
+    button or role=button ancestor.
+    """
+    try:
+        item.scroll_into_view_if_needed(timeout=1000)
+    except Exception:
+        pass
+
+    try:
+        item.click(timeout=2500)
+        page.wait_for_timeout(1000)
+        log(f"Clicked calendar element for {iso}")
+        return True
+    except Exception:
+        pass
+
+    try:
+        item.click(timeout=2500, force=True)
+        page.wait_for_timeout(1000)
+        log(f"Force-clicked calendar element for {iso}")
+        return True
+    except Exception:
+        pass
+
+    try:
+        item.evaluate(
+            """
+            el => {
+                const clickable = el.closest('button, [role="button"], [tabindex]');
+                if (clickable) clickable.click();
+                else el.click();
+            }
+            """
+        )
+        page.wait_for_timeout(1000)
+        log(f"JS-clicked calendar element/parent for {iso}")
+        return True
+    except Exception:
+        return False
 
 def select_calendar_date(page: Page, travel_date: date, scope: Optional[Locator] = None) -> bool:
     iso = travel_date.isoformat()
@@ -286,10 +328,20 @@ def select_calendar_date(page: Page, travel_date: date, scope: Optional[Locator]
     for month_step in range(14):
         log(f"Trying to select date {iso}; calendar month step {month_step}")
 
+        # First: dump some useful diagnostics.
+        try:
+            scope_text = search_scope.inner_text(timeout=1500)
+            compact = re.sub(r"\s+", " ", scope_text).strip()
+            log(f"Calendar scope text sample: {compact[:300]!r}")
+        except Exception:
+            log("Could not read calendar scope text")
+
+        # Broad search: dates may be buttons, divs, spans, gridcells, or nested text.
         candidate_locators = [
             search_scope.locator(f'[data-date="{iso}"]'),
-            search_scope.locator(f'[data-testid*="{iso}"]'),
             search_scope.locator(f'[aria-label*="{iso}"]'),
+            search_scope.locator(f'[data-testid*="{iso}"]'),
+
             search_scope.get_by_role(
                 "button",
                 name=re.compile(
@@ -297,37 +349,42 @@ def select_calendar_date(page: Page, travel_date: date, scope: Optional[Locator]
                     re.I,
                 ),
             ),
-            search_scope.locator("button").filter(
-                has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")
+            search_scope.get_by_role(
+                "gridcell",
+                name=re.compile(
+                    rf"({re.escape(day)}|{re.escape(day_padded)}).*(?:{re.escape(month_full)}|{re.escape(month_short)}).*{year}",
+                    re.I,
+                ),
             ),
-            search_scope.locator("[role='button']").filter(
-                has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")
-            ),
+
+            search_scope.get_by_text(re.compile(rf"^\s*{re.escape(day)}\s*$")),
+            search_scope.get_by_text(re.compile(rf"^\s*{re.escape(day_padded)}\s*$")),
+
+            search_scope.locator("button").filter(has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")),
+            search_scope.locator("[role='button']").filter(has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")),
+            search_scope.locator("[role='gridcell']").filter(has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")),
+            search_scope.locator("td").filter(has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")),
+            search_scope.locator("div").filter(has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")),
+            search_scope.locator("span").filter(has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")),
         ]
 
         for locator in candidate_locators:
-            item = visible_first(locator, timeout=700)
-            if item is None:
-                continue
-
             try:
-                item.scroll_into_view_if_needed(timeout=1000)
+                count = min(locator.count(), 20)
             except Exception:
-                pass
+                count = 0
 
-            try:
-                item.click(timeout=3000)
-                page.wait_for_timeout(1000)
-                log(f"Clicked calendar candidate for {iso}")
-                return True
-            except Exception:
+            for i in range(count):
+                item = locator.nth(i)
+
                 try:
-                    item.click(timeout=3000, force=True)
-                    page.wait_for_timeout(1000)
-                    log(f"Force-clicked calendar candidate for {iso}")
-                    return True
+                    if not item.is_visible(timeout=300):
+                        continue
                 except Exception:
                     continue
+
+                if click_locator_or_clickable_parent(item, page, iso):
+                    return True
 
         if not click_calendar_next(page, search_scope):
             log(f"Could not find next-month button while selecting {iso}")
