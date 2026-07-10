@@ -45,6 +45,13 @@ def date_range(start: date, end: date) -> Iterable[date]:
 
 
 def parse_prices(text: str) -> list[tuple[str, float]]:
+    text = text.replace("\xa0", " ")
+
+    # Eurostar sometimes splits prices visually/textually, e.g. "£ 115 .50".
+    text = re.sub(r"([£€])\s+(\d{2,4})\s*[,.]\s*(\d{1,2})", r"\1\2.\3", text)
+    text = re.sub(r"([£€])\s+(\d{2,4})", r"\1\2", text)
+    text = re.sub(r"(\d{2,4})\s*[,.]\s*(\d{1,2})\s*(GBP|EUR)", r"\1.\2 \3", text, flags=re.I)
+
     prices: list[tuple[str, float]] = []
 
     for m in PRICE_RE.finditer(text):
@@ -75,6 +82,23 @@ def cheapest_allowed_price(text: str, allowed: set[str]) -> Optional[tuple[str, 
         return None
     return min(prices, key=lambda item: item[1])
 
+
+def cheapest_normal_fare_price(text: str, allowed: set[str]) -> Optional[tuple[str, float]]:
+    """
+    Normal Eurostar pages contain non-ticket prices/amounts such as fees,
+    promo fragments, and other small values. For normal one-way Eurostar fares,
+    ignore implausibly small amounts so we do not alert on £4.50/£15/£20 noise.
+    """
+    prices = [
+        (cur, amt)
+        for cur, amt in parse_prices(text)
+        if cur in allowed and 30 <= amt <= 500
+    ]
+
+    if not prices:
+        return None
+
+    return min(prices, key=lambda item: item[1])
 
 def accept_cookies(page: Page) -> None:
     patterns = ["Accept all", "Accept", "I agree", "Allow all", "Agree", "OK"]
@@ -1140,7 +1164,7 @@ def check_normal_eurostar(page: Page, route: RouteQuery, config: AppConfig) -> l
                 continue
 
             text = body_text(page, timeout=15000)
-            price = cheapest_allowed_price(text, allowed)
+            price = cheapest_normal_fare_price(text, allowed)
 
             if not price:
                 log(f"NORMAL no parseable price: {route.name} {travel_date}")
