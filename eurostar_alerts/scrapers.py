@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from .config import AppConfig
 from .models import FareHit, Provider, RouteQuery
@@ -115,6 +115,234 @@ def body_text(page: Page, timeout: int = 10000) -> str:
         return page.locator("body").inner_text(timeout=timeout)
     except Exception:
         return ""
+
+
+def visible_first(locator: Locator, timeout: int = 500) -> Optional[Locator]:
+    try:
+        count = locator.count()
+    except Exception:
+        return None
+
+    for i in range(count):
+        item = locator.nth(i)
+        try:
+            if item.is_visible(timeout=timeout):
+                return item
+        except Exception:
+            continue
+    return None
+
+
+def station_candidates(value: str) -> list[str]:
+    candidates = [value]
+    cleaned = value.replace("/", " ").replace("'", "")
+    candidates.append(cleaned)
+
+    lower = value.lower()
+    if "london" in lower and "pancras" in lower:
+        candidates.extend(["London St Pancras", "St Pancras", "London"])
+    if "brussels" in lower or "bruxelles" in lower:
+        candidates.extend(["Brussels Midi", "Bruxelles Midi", "Brussels", "Bruxelles"])
+    if "paris" in lower:
+        candidates.extend(["Paris Gare du Nord", "Paris Nord", "Paris"])
+    if "amsterdam" in lower:
+        candidates.extend(["Amsterdam Centraal", "Amsterdam"])
+    if "rotterdam" in lower:
+        candidates.extend(["Rotterdam Centraal", "Rotterdam"])
+    if "lille" in lower:
+        candidates.extend(["Lille Europe", "Lille"])
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for c in candidates:
+        c = re.sub(r"\s+", " ", c).strip()
+        if len(c) < 3:
+            continue
+        key = c.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+    return unique
+
+
+def choose_station_option(page: Page, value: str) -> bool:
+    for term in station_candidates(value):
+        escaped = re.escape(term)
+        patterns = [
+            page.get_by_role("option", name=re.compile(escaped, re.I)),
+            page.get_by_role("button", name=re.compile(escaped, re.I)),
+            page.locator("[role='option']").filter(has_text=re.compile(escaped, re.I)),
+            page.locator("li").filter(has_text=re.compile(escaped, re.I)),
+        ]
+        for locator in patterns:
+            item = visible_first(locator, timeout=700)
+            if item is None:
+                continue
+            try:
+                item.click(timeout=2000)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def fill_station_field(page: Page, form: Locator, field_testid: str, value: str) -> bool:
+    field = form.locator(f'input[data-testid="{field_testid}"]').first
+    try:
+        field.click(timeout=4000)
+        page.keyboard.press("Control+A")
+        field.fill(value, timeout=4000)
+        page.wait_for_timeout(800)
+
+        selected = choose_station_option(page, value)
+        if not selected:
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(200)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(500)
+
+        current = field.input_value(timeout=2000).strip()
+        if current:
+            return True
+
+        page.wait_for_timeout(1000)
+        current = field.input_value(timeout=2000).strip()
+        return bool(current)
+    except Exception:
+        return False
+
+
+def click_calendar_next(page: Page) -> bool:
+    candidates = [
+        page.get_by_role("button", name=re.compile(r"next", re.I)),
+        page.locator("button[aria-label*='Next']"),
+        page.locator("button").filter(has_text=re.compile(r"^\s*[›>]+\s*$")),
+    ]
+    for locator in candidates:
+        item = visible_first(locator, timeout=500)
+        if item is None:
+            continue
+        try:
+            item.click(timeout=1500)
+            page.wait_for_timeout(500)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def select_calendar_date(page: Page, travel_date: date) -> bool:
+    iso = travel_date.isoformat()
+
+    for _ in range(14):
+        exact = page.locator(f'button[data-date="{iso}"], [role="button"][data-date="{iso}"]')
+        item = visible_first(exact, timeout=700)
+        if item is not None:
+            try:
+                item.click(timeout=3000)
+                page.wait_for_timeout(700)
+                return True
+            except Exception:
+                pass
+
+        day = str(travel_date.day)
+        month = travel_date.strftime("%B")
+        year = str(travel_date.year)
+        date_name = re.compile(rf"\b{re.escape(day)}\b.*\b{re.escape(month)}\b.*\b{year}\b", re.I)
+        aria_match = page.get_by_role("button", name=date_name)
+        item = visible_first(aria_match, timeout=700)
+        if item is not None:
+            try:
+                item.click(timeout=3000)
+                page.wait_for_timeout(700)
+                return True
+            except Exception:
+                pass
+
+        if not click_calendar_next(page):
+            break
+
+    return False
+
+
+def set_normal_outbound_date(page: Page, form: Locator, travel_date: date) -> bool:
+    iso = travel_date.isoformat()
+    date_button = form.locator('button[data-testid="start-date"]').first
+
+    try:
+        current = date_button.get_attribute("data-date", timeout=2000)
+        if current == iso:
+            return True
+    except Exception:
+        pass
+
+    try:
+        date_button.click(timeout=4000)
+        page.wait_for_timeout(800)
+    except Exception:
+        return False
+
+    if not select_calendar_date(page, travel_date):
+        return False
+
+    try:
+        page.wait_for_timeout(1000)
+        updated = date_button.get_attribute("data-date", timeout=3000)
+        if updated == iso:
+            return True
+    except Exception:
+        pass
+
+    try:
+        visible_text = date_button.inner_text(timeout=3000).lower()
+        return travel_date.strftime("%d").lstrip("0") in visible_text and travel_date.strftime("%b").lower() in visible_text
+    except Exception:
+        return False
+
+
+def set_normal_passengers(page: Page, form: Locator, passengers: int) -> None:
+    if passengers == 1:
+        return
+
+    try:
+        selector = form.locator('[data-testid="train-travellers-selector"] button').first
+        selector.click(timeout=3000)
+        page.wait_for_timeout(500)
+    except Exception:
+        return
+
+    for _ in range(max(0, passengers - 1)):
+        clicked = False
+        for locator in [
+            page.get_by_role("button", name=re.compile(r"increase.*adult|add.*adult|adult.*increase", re.I)),
+            page.locator("button").filter(has_text=re.compile(r"^\s*\+\s*$")),
+        ]:
+            item = visible_first(locator, timeout=500)
+            if item is None:
+                continue
+            try:
+                item.click(timeout=1500)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            break
+
+
+def get_train_form(page: Page) -> Optional[Locator]:
+    forms = page.locator('form[data-testid="booking-magnet-form-trains"]')
+    return visible_first(forms, timeout=1000)
+
+
+def click_normal_search(page: Page, form: Locator) -> bool:
+    try:
+        form.locator('button[data-testid="button-search"]').first.click(timeout=4000)
+        safe_wait(page, timeout=12000)
+        page.wait_for_timeout(2000)
+        return True
+    except Exception:
+        return False
 
 
 def fill_text_field(page: Page, labels: list[str], value: str) -> bool:
@@ -274,7 +502,7 @@ def check_snap(page: Page, route: RouteQuery, config: AppConfig) -> list[FareHit
             dest_ok = fill_text_field(page, ["to", "destination", "arrival"], route.destination)
             date_ok = fill_date_field(page, travel_date)
             set_passengers(page, route.passengers)
-            clicked = click_search(page)
+            clicked = click_search(page) if origin_ok and dest_ok and date_ok else False
 
             if not origin_ok or not dest_ok or not date_ok or not clicked:
                 log(
@@ -345,21 +573,41 @@ def check_normal_eurostar(page: Page, route: RouteQuery, config: AppConfig) -> l
             accept_cookies(page)
             safe_wait(page, timeout=8000)
 
-            origin_ok = fill_text_field(page, ["from", "origin", "departure"], route.origin)
-            dest_ok = fill_text_field(page, ["to", "destination", "arrival"], route.destination)
-            date_ok = fill_date_field(page, travel_date)
-            set_passengers(page, route.passengers)
-            clicked = click_search(page)
+            form = get_train_form(page)
+            if form is None:
+                log(f"NORMAL form missing: {route.name} {travel_date}")
+                save_debug(page, f"normal_form_missing_{route.name}_{travel_date}", config.settings.debug)
+                continue
+
+            origin_ok = fill_station_field(page, form, "origin-field", route.origin)
+            dest_ok = fill_station_field(page, form, "destination-field", route.destination)
+            date_ok = set_normal_outbound_date(page, form, travel_date)
+            set_normal_passengers(page, form, route.passengers)
+            clicked = click_normal_search(page, form) if origin_ok and dest_ok and date_ok else False
 
             if not origin_ok or not dest_ok or not date_ok or not clicked:
+                try:
+                    start_attr = form.locator('button[data-testid="start-date"]').first.get_attribute("data-date", timeout=1000)
+                except Exception:
+                    start_attr = "unknown"
+                try:
+                    origin_value = form.locator('input[data-testid="origin-field"]').first.input_value(timeout=1000)
+                except Exception:
+                    origin_value = "unknown"
+                try:
+                    dest_value = form.locator('input[data-testid="destination-field"]').first.input_value(timeout=1000)
+                except Exception:
+                    dest_value = "unknown"
+
                 log(
                     f"NORMAL form incomplete: {route.name} {travel_date} "
-                    f"origin_ok={origin_ok} dest_ok={dest_ok} date_ok={date_ok} clicked={clicked}"
+                    f"origin_ok={origin_ok} dest_ok={dest_ok} date_ok={date_ok} clicked={clicked} "
+                    f"origin_value={origin_value!r} dest_value={dest_value!r} start_date_attr={start_attr!r}"
                 )
                 save_debug(page, f"normal_form_incomplete_{route.name}_{travel_date}", config.settings.debug)
                 continue
 
-            text = body_text(page, timeout=12000)
+            text = body_text(page, timeout=15000)
             price = cheapest_allowed_price(text, allowed)
 
             if not price:
