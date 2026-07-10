@@ -1,0 +1,46 @@
+name: Eurostar fare monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+    - cron: "0 0,12 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  check-fares:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run fare checker
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_WHATSAPP: ${{ secrets.TWILIO_FROM_WHATSAPP }}
+          TWILIO_TO_WHATSAPP: ${{ secrets.TWILIO_TO_WHATSAPP }}
+        run: |
+          python -m eurostar_alerts.main --config config.yml
+
+      - name: Commit notification state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add data/notified.json
+          git diff --cached --quiet || git commit -m "Update notified fare state"
+          git push
