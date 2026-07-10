@@ -463,7 +463,6 @@ def click_calendar_date_by_coordinates(
                 const textOf = (el) => (el.textContent || '').replace(/\\s+/g, ' ').trim();
 
                 const all = Array.from(root.querySelectorAll('*')).filter(isVisible);
-
                 const rootRect = root.getBoundingClientRect();
 
                 const monthHeadings = all
@@ -525,16 +524,28 @@ def click_calendar_date_by_coordinates(
                     }
                 }
 
-                const dayCandidates = all
+                const rawCandidates = all
                     .filter(el => textOf(el) === day)
                     .map(el => {
                         const r = el.getBoundingClientRect();
                         const cx = r.left + r.width / 2;
                         const cy = r.top + r.height / 2;
+                        const role = el.getAttribute('role');
+                        const ariaDisabled = el.getAttribute('aria-disabled');
+                        const disabled = el.hasAttribute('disabled');
+                        const tag = el.tagName;
+
+                        const clickableParent = el.closest(
+                            'button:not([disabled]), [role="button"]:not([aria-disabled="true"])'
+                        );
 
                         return {
-                            tag: el.tagName,
-                            role: el.getAttribute('role'),
+                            el,
+                            tag,
+                            role,
+                            ariaDisabled,
+                            disabled,
+                            clickableParentExists: !!clickableParent,
                             text: textOf(el),
                             x: cx,
                             y: cy,
@@ -551,18 +562,45 @@ def click_calendar_date_by_coordinates(
                         c.x <= rightBound &&
                         c.y > topBound &&
                         c.y <= rootRect.bottom
+                    );
+
+                const clickableCandidates = rawCandidates
+                    .filter(c =>
+                        !c.disabled &&
+                        c.ariaDisabled !== 'true' &&
+                        (
+                            c.role === 'button' ||
+                            c.tag === 'BUTTON' ||
+                            c.clickableParentExists
+                        )
                     )
                     .sort((a, b) => {
-                        // Prefer small date-cell-like elements over large wrappers.
                         const areaA = a.width * a.height;
                         const areaB = b.width * b.height;
-                        return areaA - areaB || a.y - b.y;
+
+                        // Prefer actual clickable date cells. Avoid bare TD gridcells.
+                        const buttonScoreA = (a.role === 'button' || a.tag === 'BUTTON') ? 0 : 1;
+                        const buttonScoreB = (b.role === 'button' || b.tag === 'BUTTON') ? 0 : 1;
+
+                        return buttonScoreA - buttonScoreB || areaA - areaB || b.y - a.y;
                     });
 
-                if (dayCandidates.length === 0) {
+                if (clickableCandidates.length === 0) {
                     return {
                         found: false,
-                        reason: 'no day candidate',
+                        reason: 'no clickable day candidate',
+                        rawCandidates: rawCandidates.map(c => ({
+                            tag: c.tag,
+                            role: c.role,
+                            ariaDisabled: c.ariaDisabled,
+                            disabled: c.disabled,
+                            clickableParentExists: c.clickableParentExists,
+                            text: c.text,
+                            x: c.x,
+                            y: c.y,
+                            width: c.width,
+                            height: c.height
+                        })).slice(0, 10),
                         rootText: textOf(root).slice(0, 500),
                         leftBound,
                         rightBound,
@@ -573,8 +611,28 @@ def click_calendar_date_by_coordinates(
 
                 return {
                     found: true,
-                    candidate: dayCandidates[0],
-                    allCandidates: dayCandidates.slice(0, 5),
+                    candidate: {
+                        tag: clickableCandidates[0].tag,
+                        role: clickableCandidates[0].role,
+                        text: clickableCandidates[0].text,
+                        x: clickableCandidates[0].x,
+                        y: clickableCandidates[0].y,
+                        left: clickableCandidates[0].left,
+                        right: clickableCandidates[0].right,
+                        top: clickableCandidates[0].top,
+                        bottom: clickableCandidates[0].bottom,
+                        width: clickableCandidates[0].width,
+                        height: clickableCandidates[0].height
+                    },
+                    allCandidates: clickableCandidates.slice(0, 5).map(c => ({
+                        tag: c.tag,
+                        role: c.role,
+                        text: c.text,
+                        x: c.x,
+                        y: c.y,
+                        width: c.width,
+                        height: c.height
+                    })),
                     leftBound,
                     rightBound,
                     topBound
