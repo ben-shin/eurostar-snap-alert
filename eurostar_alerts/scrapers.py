@@ -334,16 +334,51 @@ def select_calendar_date(page: Page, travel_date: date, scope: Optional[Locator]
             break
 
     return False
+    
+def keyboard_select_calendar_date(page: Page, current_iso: Optional[str], travel_date: date) -> bool:
+    if not current_iso:
+        return False
 
+    try:
+        current_date = date.fromisoformat(current_iso)
+    except Exception:
+        return False
 
+    delta_days = (travel_date - current_date).days
+
+    if abs(delta_days) > 370:
+        log(f"Keyboard date fallback skipped: delta too large: {delta_days}")
+        return False
+
+    key = "ArrowRight" if delta_days > 0 else "ArrowLeft"
+    steps = abs(delta_days)
+
+    log(f"Keyboard date fallback: moving {steps} days with {key}")
+
+    try:
+        page.wait_for_timeout(500)
+
+        for _ in range(steps):
+            page.keyboard.press(key)
+            page.wait_for_timeout(60)
+
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(1200)
+        return True
+
+    except Exception as exc:
+        log(f"Keyboard date fallback failed: {type(exc).__name__}: {exc}")
+        return False
 def set_normal_outbound_date(page: Page, form: Locator, travel_date: date) -> bool:
     iso = travel_date.isoformat()
     date_button = form.locator('button[data-testid="start-date"]').first
 
+    current_before: Optional[str] = None
+
     try:
-        current = date_button.get_attribute("data-date", timeout=2000)
-        log(f"Current outbound date before selection: {current!r}; target={iso!r}")
-        if current == iso:
+        current_before = date_button.get_attribute("data-date", timeout=2000)
+        log(f"Current outbound date before selection: {current_before!r}; target={iso!r}")
+        if current_before == iso:
             return True
     except Exception:
         log("Could not read current outbound date before selection")
@@ -394,7 +429,11 @@ def set_normal_outbound_date(page: Page, form: Locator, travel_date: date) -> bo
         selected = select_calendar_date(page, travel_date, scope=None)
 
     if not selected:
-        log(f"Could not click target calendar date: {iso}")
+        log(f"Click-based date selection failed for {iso}; trying keyboard fallback")
+        selected = keyboard_select_calendar_date(page, current_before, travel_date)
+
+    if not selected:
+        log(f"Could not click or keyboard-select target calendar date: {iso}")
         return False
 
     try:
