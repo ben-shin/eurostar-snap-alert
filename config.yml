@@ -32,7 +32,7 @@ normal_eurostar:
 routes:
   - name: "London to Brussels"
     origin: "London St Pancras International"
-    destination: "Brussels Midi/Zuid"
+    destination: "Brussels Midi"
     start_date: "2026-07-18"
     end_date: "2026-07-19"
     passengers: 1
