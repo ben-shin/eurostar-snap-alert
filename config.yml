@@ -26,15 +26,15 @@ checks:
 normal_eurostar:
   # Notify when a normal one-way Eurostar fare is <= this numeric amount in either GBP or EUR.
   # This intentionally does not do FX conversion; it treats £70 and €70 as threshold hits.
-  threshold_amount: 70
+  threshold_amount: 100
   allowed_currencies: ["GBP", "EUR"]
 
 routes:
-  - name: "London to Brussels"
-    origin: "London St Pancras International"
-    destination: "Brussels Midi"
-    start_date: "2026-07-18"
-    end_date: "2026-07-19"
+  - name: "Brussels to London"
+    origin: "Brussels Midi"
+    destination: "London St Pancras International"
+    start_date: "2026-07-27"
+    end_date: "2026-07-30"
     passengers: 1
     # Optional direct pages used in notification fallback links.
     snap_link: "https://snap.eurostar.com/uk-en"
