@@ -669,7 +669,11 @@ def set_normal_outbound_date(page: Page, form: Locator, travel_date: date) -> bo
         selected = select_calendar_date(page, travel_date, scope=None)
 
     if not selected:
-        log(f"Click-based date selection failed for {iso}; trying keyboard fallback")
+        log(f"Click-based date selection failed for {iso}; trying coordinate fallback")
+        selected = click_calendar_date_by_coordinates(page, popover_id, travel_date)
+    
+    if not selected:
+        log(f"Coordinate fallback failed for {iso}; trying keyboard fallback")
         selected = keyboard_select_calendar_date(page, current_before, travel_date)
 
     if not selected:
