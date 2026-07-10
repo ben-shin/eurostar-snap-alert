@@ -34,7 +34,7 @@ routes:
     origin: "London St Pancras International"
     destination: "Brussels Midi/Zuid"
     start_date: "2026-07-18"
-    end_date: "2026-08-18"
+    end_date: "2026-07-19"
     passengers: 1
     # Optional direct pages used in notification fallback links.
     snap_link: "https://snap.eurostar.com/uk-en"
