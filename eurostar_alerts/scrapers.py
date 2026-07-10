@@ -10,6 +10,7 @@ from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
 from .config import AppConfig
 from .models import FareHit, Provider, RouteQuery
 
+
 PRICE_RE = re.compile(
     r"(?P<sym>[£€])\s?(?P<amount>\d{1,4}(?:[,.]\d{1,2})?)|(?P<amount2>\d{1,4}(?:[,.]\d{1,2})?)\s?(?P<code>GBP|EUR)",
     re.IGNORECASE,
@@ -188,7 +189,6 @@ def choose_station_option(page: Page, value: str) -> bool:
             page.get_by_role("button", name=re.compile(escaped, re.I)),
             page.locator("[role='option']").filter(has_text=re.compile(escaped, re.I)),
             page.locator("li").filter(has_text=re.compile(escaped, re.I)),
-            page.locator("div").filter(has_text=re.compile(escaped, re.I)),
         ]
 
         for locator in patterns:
@@ -208,49 +208,64 @@ def choose_station_option(page: Page, value: str) -> bool:
 def fill_station_field(page: Page, form: Locator, field_testid: str, value: str) -> bool:
     field = form.locator(f'input[data-testid="{field_testid}"]').first
 
+    terms = station_candidates(value)
+
+    for term in terms:
+        try:
+            field.click(timeout=4000)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(300)
+
+            field.fill(term, timeout=4000)
+            page.wait_for_timeout(1200)
+
+            selected = choose_station_option(page, term)
+
+            if not selected:
+                page.keyboard.press("ArrowDown")
+                page.wait_for_timeout(300)
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(800)
+
+            current = field.input_value(timeout=2000).strip()
+
+            if current:
+                log(
+                    f"Station selected for {field_testid}: "
+                    f"requested={value!r}, typed={term!r}, got={current!r}"
+                )
+                return True
+
+        except Exception:
+            continue
+
     try:
-        field.click(timeout=4000)
-        page.keyboard.press("Control+A")
-        field.fill(value, timeout=4000)
-        page.wait_for_timeout(800)
-
-        selected = choose_station_option(page, value)
-
-        if not selected:
-            page.keyboard.press("ArrowDown")
-            page.wait_for_timeout(200)
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(500)
-
         current = field.input_value(timeout=2000).strip()
-
-        if current:
-            return True
-
-        page.wait_for_timeout(1000)
-        current = field.input_value(timeout=2000).strip()
-
-        return bool(current)
-
+        log(f"Station selection failed for {field_testid}: requested={value!r}, final={current!r}")
     except Exception:
-        return False
+        log(f"Station selection failed for {field_testid}: requested={value!r}, final=unknown")
+
+    return False
 
 
-def click_calendar_next(page: Page) -> bool:
+def click_calendar_next(page: Page, scope: Optional[Locator] = None) -> bool:
+    search_scope = scope if scope is not None else page.locator("body")
+
     candidates = [
-        page.get_by_role("button", name=re.compile(r"next", re.I)),
-        page.locator("button[aria-label*='Next']"),
-        page.locator("button").filter(has_text=re.compile(r"^\s*[›>]+\s*$")),
+        search_scope.get_by_role("button", name=re.compile(r"next", re.I)),
+        search_scope.locator("button[aria-label*='Next']"),
+        search_scope.locator("button").filter(has_text=re.compile(r"^\s*[›>]+\s*$")),
     ]
 
     for locator in candidates:
-        item = visible_first(locator, timeout=500)
+        item = visible_first(locator, timeout=700)
         if item is None:
             continue
 
         try:
-            item.click(timeout=1500)
-            page.wait_for_timeout(500)
+            item.click(timeout=2000)
+            page.wait_for_timeout(700)
             return True
         except Exception:
             continue
@@ -258,42 +273,64 @@ def click_calendar_next(page: Page) -> bool:
     return False
 
 
-def select_calendar_date(page: Page, travel_date: date) -> bool:
+def select_calendar_date(page: Page, travel_date: date, scope: Optional[Locator] = None) -> bool:
     iso = travel_date.isoformat()
+    day = str(travel_date.day)
+    day_padded = travel_date.strftime("%d")
+    month_full = travel_date.strftime("%B")
+    month_short = travel_date.strftime("%b")
+    year = str(travel_date.year)
 
-    for _ in range(14):
-        exact = page.locator(f'button[data-date="{iso}"], [role="button"][data-date="{iso}"]')
-        item = visible_first(exact, timeout=700)
+    search_scope = scope if scope is not None else page.locator("body")
 
-        if item is not None:
+    for month_step in range(14):
+        log(f"Trying to select date {iso}; calendar month step {month_step}")
+
+        candidate_locators = [
+            search_scope.locator(f'[data-date="{iso}"]'),
+            search_scope.locator(f'[data-testid*="{iso}"]'),
+            search_scope.locator(f'[aria-label*="{iso}"]'),
+            search_scope.get_by_role(
+                "button",
+                name=re.compile(
+                    rf"({re.escape(day)}|{re.escape(day_padded)}).*(?:{re.escape(month_full)}|{re.escape(month_short)}).*{year}",
+                    re.I,
+                ),
+            ),
+            search_scope.locator("button").filter(
+                has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")
+            ),
+            search_scope.locator("[role='button']").filter(
+                has_text=re.compile(rf"^\s*{re.escape(day)}\s*$")
+            ),
+        ]
+
+        for locator in candidate_locators:
+            item = visible_first(locator, timeout=700)
+            if item is None:
+                continue
+
             try:
-                item.click(timeout=3000)
-                page.wait_for_timeout(700)
-                return True
+                item.scroll_into_view_if_needed(timeout=1000)
             except Exception:
                 pass
 
-        day = str(travel_date.day)
-        month = travel_date.strftime("%B")
-        year = str(travel_date.year)
-
-        date_name = re.compile(
-            rf"\b{re.escape(day)}\b.*\b{re.escape(month)}\b.*\b{year}\b",
-            re.I,
-        )
-
-        aria_match = page.get_by_role("button", name=date_name)
-        item = visible_first(aria_match, timeout=700)
-
-        if item is not None:
             try:
                 item.click(timeout=3000)
-                page.wait_for_timeout(700)
+                page.wait_for_timeout(1000)
+                log(f"Clicked calendar candidate for {iso}")
                 return True
             except Exception:
-                pass
+                try:
+                    item.click(timeout=3000, force=True)
+                    page.wait_for_timeout(1000)
+                    log(f"Force-clicked calendar candidate for {iso}")
+                    return True
+                except Exception:
+                    continue
 
-        if not click_calendar_next(page):
+        if not click_calendar_next(page, search_scope):
+            log(f"Could not find next-month button while selecting {iso}")
             break
 
     return False
@@ -305,23 +342,65 @@ def set_normal_outbound_date(page: Page, form: Locator, travel_date: date) -> bo
 
     try:
         current = date_button.get_attribute("data-date", timeout=2000)
+        log(f"Current outbound date before selection: {current!r}; target={iso!r}")
         if current == iso:
             return True
+    except Exception:
+        log("Could not read current outbound date before selection")
+
+    try:
+        date_button.scroll_into_view_if_needed(timeout=2000)
+    except Exception:
+        pass
+
+    popover_id = None
+    try:
+        popover_id = date_button.get_attribute("aria-controls", timeout=1000)
     except Exception:
         pass
 
     try:
         date_button.click(timeout=4000)
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1200)
     except Exception:
-        return False
+        try:
+            date_button.click(timeout=4000, force=True)
+            page.wait_for_timeout(1200)
+        except Exception:
+            log("Could not click outbound date button")
+            return False
 
-    if not select_calendar_date(page, travel_date):
+    try:
+        expanded = date_button.get_attribute("aria-expanded", timeout=1000)
+        log(f"Date button aria-expanded after click: {expanded!r}; popover_id={popover_id!r}")
+    except Exception:
+        pass
+
+    scope: Optional[Locator] = None
+
+    if popover_id:
+        try:
+            possible_scope = page.locator(f'[id="{popover_id}"]')
+            if possible_scope.count() > 0:
+                scope = possible_scope
+                log(f"Using date popover scope: {popover_id}")
+        except Exception:
+            scope = None
+
+    selected = select_calendar_date(page, travel_date, scope=scope)
+
+    if not selected and scope is not None:
+        log("Date selection failed inside scoped popover; retrying on whole page")
+        selected = select_calendar_date(page, travel_date, scope=None)
+
+    if not selected:
+        log(f"Could not click target calendar date: {iso}")
         return False
 
     try:
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1200)
         updated = date_button.get_attribute("data-date", timeout=3000)
+        log(f"Current outbound date after selection: {updated!r}; target={iso!r}")
         if updated == iso:
             return True
     except Exception:
@@ -329,8 +408,14 @@ def set_normal_outbound_date(page: Page, form: Locator, travel_date: date) -> bo
 
     try:
         visible_text = date_button.inner_text(timeout=3000).lower()
+        log(f"Outbound date visible text after selection: {visible_text!r}")
+
         day_ok = travel_date.strftime("%d").lstrip("0") in visible_text
-        month_ok = travel_date.strftime("%b").lower() in visible_text
+        month_ok = (
+            travel_date.strftime("%b").lower() in visible_text
+            or travel_date.strftime("%B").lower() in visible_text
+        )
+
         return day_ok and month_ok
     except Exception:
         return False
@@ -371,10 +456,10 @@ def set_normal_passengers(page: Page, form: Locator, passengers: int) -> None:
 
 def get_train_form(page: Page) -> Optional[Locator]:
     """
-    Eurostar often renders multiple booking magnet forms: one in the header and
-    one lower down near the footer. Some copies can be reported as non-visible
-    by Playwright even though the fields are present. Prefer a visible usable
-    form, but fall back to the first form with the expected fields.
+    Eurostar often renders multiple booking magnet forms. Some copies can be
+    reported as non-visible by Playwright even though the fields are present.
+    Prefer a visible usable form, but fall back to the first form with the
+    expected fields.
     """
     selector = 'form[data-testid="booking-magnet-form-trains"]'
 
@@ -654,7 +739,7 @@ def check_normal_eurostar(page: Page, route: RouteQuery, config: AppConfig) -> l
     hits: list[FareHit] = []
 
     threshold = config.normal_eurostar.threshold_amount
-    allowed = config.normal_eurostar.allowed_currencies
+    allowed = set(config.normal_eurostar.allowed_currencies)
 
     log(f"Checking normal Eurostar fares for {route.name}")
 
