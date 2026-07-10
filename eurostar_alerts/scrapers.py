@@ -426,6 +426,189 @@ def keyboard_select_calendar_date(page: Page, current_iso: Optional[str], travel
     except Exception as exc:
         log(f"Keyboard date fallback failed: {type(exc).__name__}: {exc}")
         return False
+
+def click_calendar_date_by_coordinates(
+    page: Page,
+    popover_id: Optional[str],
+    travel_date: date,
+) -> bool:
+    month_label = travel_date.strftime("%B %Y")
+    day = str(travel_date.day)
+    iso = travel_date.isoformat()
+
+    log(f"Coordinate date fallback: target={iso}, month_label={month_label!r}, day={day!r}")
+
+    try:
+        point = page.evaluate(
+            """
+            ({ popoverId, monthLabel, day }) => {
+                const root = popoverId
+                    ? document.getElementById(popoverId)
+                    : document.body;
+
+                if (!root) return null;
+
+                const isVisible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return (
+                        style &&
+                        style.visibility !== 'hidden' &&
+                        style.display !== 'none' &&
+                        rect.width > 0 &&
+                        rect.height > 0
+                    );
+                };
+
+                const textOf = (el) => (el.textContent || '').replace(/\\s+/g, ' ').trim();
+
+                const all = Array.from(root.querySelectorAll('*')).filter(isVisible);
+
+                const rootRect = root.getBoundingClientRect();
+
+                const monthHeadings = all
+                    .filter(el => textOf(el) === monthLabel)
+                    .map(el => {
+                        const r = el.getBoundingClientRect();
+                        return {
+                            el,
+                            left: r.left,
+                            right: r.right,
+                            top: r.top,
+                            bottom: r.bottom,
+                            cx: r.left + r.width / 2,
+                            cy: r.top + r.height / 2,
+                            text: textOf(el)
+                        };
+                    })
+                    .sort((a, b) => a.cx - b.cx || a.cy - b.cy);
+
+                let leftBound = rootRect.left;
+                let rightBound = rootRect.right;
+                let topBound = rootRect.top;
+
+                if (monthHeadings.length > 0) {
+                    const heading = monthHeadings[0];
+                    topBound = heading.bottom;
+
+                    const allMonthHeadings = all
+                        .filter(el => /^[A-Za-z]+\\s+\\d{4}$/.test(textOf(el)))
+                        .map(el => {
+                            const r = el.getBoundingClientRect();
+                            return {
+                                el,
+                                text: textOf(el),
+                                left: r.left,
+                                right: r.right,
+                                top: r.top,
+                                bottom: r.bottom,
+                                cx: r.left + r.width / 2,
+                                cy: r.top + r.height / 2
+                            };
+                        })
+                        .sort((a, b) => a.cx - b.cx || a.cy - b.cy);
+
+                    const idx = allMonthHeadings.findIndex(h => h.text === monthLabel);
+
+                    if (idx >= 0) {
+                        const current = allMonthHeadings[idx];
+                        const prev = allMonthHeadings[idx - 1];
+                        const next = allMonthHeadings[idx + 1];
+
+                        if (prev) {
+                            leftBound = (prev.cx + current.cx) / 2;
+                        }
+
+                        if (next) {
+                            rightBound = (current.cx + next.cx) / 2;
+                        }
+                    }
+                }
+
+                const dayCandidates = all
+                    .filter(el => textOf(el) === day)
+                    .map(el => {
+                        const r = el.getBoundingClientRect();
+                        const cx = r.left + r.width / 2;
+                        const cy = r.top + r.height / 2;
+
+                        return {
+                            tag: el.tagName,
+                            role: el.getAttribute('role'),
+                            text: textOf(el),
+                            x: cx,
+                            y: cy,
+                            left: r.left,
+                            right: r.right,
+                            top: r.top,
+                            bottom: r.bottom,
+                            width: r.width,
+                            height: r.height
+                        };
+                    })
+                    .filter(c =>
+                        c.x >= leftBound &&
+                        c.x <= rightBound &&
+                        c.y > topBound &&
+                        c.y <= rootRect.bottom
+                    )
+                    .sort((a, b) => {
+                        // Prefer small date-cell-like elements over large wrappers.
+                        const areaA = a.width * a.height;
+                        const areaB = b.width * b.height;
+                        return areaA - areaB || a.y - b.y;
+                    });
+
+                if (dayCandidates.length === 0) {
+                    return {
+                        found: false,
+                        reason: 'no day candidate',
+                        rootText: textOf(root).slice(0, 500),
+                        leftBound,
+                        rightBound,
+                        topBound,
+                        rootBottom: rootRect.bottom
+                    };
+                }
+
+                return {
+                    found: true,
+                    candidate: dayCandidates[0],
+                    allCandidates: dayCandidates.slice(0, 5),
+                    leftBound,
+                    rightBound,
+                    topBound
+                };
+            }
+            """,
+            {
+                "popoverId": popover_id,
+                "monthLabel": month_label,
+                "day": day,
+            },
+        )
+    except Exception as exc:
+        log(f"Coordinate date fallback JS failed: {type(exc).__name__}: {exc}")
+        return False
+
+    log(f"Coordinate date fallback result: {point!r}")
+
+    if not point or not point.get("found"):
+        return False
+
+    candidate = point["candidate"]
+    x = candidate["x"]
+    y = candidate["y"]
+
+    try:
+        page.mouse.click(x, y)
+        page.wait_for_timeout(1200)
+        log(f"Coordinate-clicked date {iso} at x={x}, y={y}")
+        return True
+    except Exception as exc:
+        log(f"Coordinate date fallback click failed: {type(exc).__name__}: {exc}")
+        return False
+
 def set_normal_outbound_date(page: Page, form: Locator, travel_date: date) -> bool:
     iso = travel_date.isoformat()
     date_button = form.locator('button[data-testid="start-date"]').first
