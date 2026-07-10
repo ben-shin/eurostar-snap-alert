@@ -1,0 +1,51 @@
+# Copy this to config.yml and edit it.
+# Keep the repository private if you do not want your travel searches visible.
+
+settings:
+  timezone: Europe/London
+  headless: true
+  debug: true
+  user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36 BenEurostarFareMonitor/0.1"
+  # Snap official page says bookings can be made up to 10 days before travel.
+  snap_max_days_ahead: 10
+  # Be gentle. The workflow already runs every 15 min; don't add internal retry loops.
+  page_timeout_ms: 45000
+
+notification:
+  provider: twilio_whatsapp
+  # These are read from GitHub Actions secrets, not from this config file.
+  twilio_account_sid_env: TWILIO_ACCOUNT_SID
+  twilio_auth_token_env: TWILIO_AUTH_TOKEN
+  twilio_from_whatsapp_env: TWILIO_FROM_WHATSAPP   # e.g. whatsapp:+14155238886 for Twilio sandbox
+  twilio_to_whatsapp_env: TWILIO_TO_WHATSAPP       # e.g. whatsapp:+447700900000
+
+checks:
+  snap: true
+  normal_eurostar: true
+
+normal_eurostar:
+  # Notify when a normal one-way Eurostar fare is <= this numeric amount in either GBP or EUR.
+  # This intentionally does not do FX conversion; it treats £70 and €70 as threshold hits.
+  threshold_amount: 70
+  allowed_currencies: ["GBP", "EUR"]
+
+routes:
+  - name: "London to Brussels"
+    origin: "London St Pancras International"
+    destination: "Brussels Midi/Zuid"
+    start_date: "2026-07-13"
+    end_date: "2026-07-24"
+    passengers: 1
+    # Optional direct pages used in notification fallback links.
+    snap_link: "https://snap.eurostar.com/uk-en"
+    booking_link: "https://www.eurostar.com/rw-en"
+
+  # Add as many as you like:
+  # - name: "London to Paris"
+  #   origin: "London St Pancras International"
+  #   destination: "Paris Gare du Nord"
+  #   start_date: "2026-07-13"
+  #   end_date: "2026-07-24"
+  #   passengers: 1
+  #   snap_link: "https://snap.eurostar.com/uk-en"
+  #   booking_link: "https://www.eurostar.com/rw-en"
