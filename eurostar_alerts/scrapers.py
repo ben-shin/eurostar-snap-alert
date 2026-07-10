@@ -45,6 +45,7 @@ def date_range(start: date, end: date) -> Iterable[date]:
 
 def parse_prices(text: str) -> list[tuple[str, float]]:
     prices: list[tuple[str, float]] = []
+
     for m in PRICE_RE.finditer(text):
         if m.group("sym"):
             currency = "GBP" if m.group("sym") == "£" else "EUR"
@@ -76,6 +77,7 @@ def cheapest_allowed_price(text: str, allowed: set[str]) -> Optional[tuple[str, 
 
 def accept_cookies(page: Page) -> None:
     patterns = ["Accept all", "Accept", "I agree", "Allow all", "Agree", "OK"]
+
     for label in patterns:
         try:
             page.get_by_role("button", name=re.compile(label, re.I)).click(timeout=1500)
@@ -97,6 +99,7 @@ def save_debug(page: Page, prefix: str, enabled: bool) -> None:
 
     debug_dir = Path("debug")
     debug_dir.mkdir(exist_ok=True)
+
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", prefix)[:120]
 
     try:
@@ -130,64 +133,81 @@ def visible_first(locator: Locator, timeout: int = 500) -> Optional[Locator]:
                 return item
         except Exception:
             continue
+
     return None
 
 
 def station_candidates(value: str) -> list[str]:
     candidates = [value]
+
     cleaned = value.replace("/", " ").replace("'", "")
     candidates.append(cleaned)
 
     lower = value.lower()
+
     if "london" in lower and "pancras" in lower:
         candidates.extend(["London St Pancras", "St Pancras", "London"])
+
     if "brussels" in lower or "bruxelles" in lower:
         candidates.extend(["Brussels Midi", "Bruxelles Midi", "Brussels", "Bruxelles"])
+
     if "paris" in lower:
         candidates.extend(["Paris Gare du Nord", "Paris Nord", "Paris"])
+
     if "amsterdam" in lower:
         candidates.extend(["Amsterdam Centraal", "Amsterdam"])
+
     if "rotterdam" in lower:
         candidates.extend(["Rotterdam Centraal", "Rotterdam"])
+
     if "lille" in lower:
         candidates.extend(["Lille Europe", "Lille"])
 
     seen: set[str] = set()
     unique: list[str] = []
+
     for c in candidates:
         c = re.sub(r"\s+", " ", c).strip()
         if len(c) < 3:
             continue
+
         key = c.lower()
         if key not in seen:
             seen.add(key)
             unique.append(c)
+
     return unique
 
 
 def choose_station_option(page: Page, value: str) -> bool:
     for term in station_candidates(value):
         escaped = re.escape(term)
+
         patterns = [
             page.get_by_role("option", name=re.compile(escaped, re.I)),
             page.get_by_role("button", name=re.compile(escaped, re.I)),
             page.locator("[role='option']").filter(has_text=re.compile(escaped, re.I)),
             page.locator("li").filter(has_text=re.compile(escaped, re.I)),
+            page.locator("div").filter(has_text=re.compile(escaped, re.I)),
         ]
+
         for locator in patterns:
             item = visible_first(locator, timeout=700)
             if item is None:
                 continue
+
             try:
                 item.click(timeout=2000)
                 return True
             except Exception:
                 continue
+
     return False
 
 
 def fill_station_field(page: Page, form: Locator, field_testid: str, value: str) -> bool:
     field = form.locator(f'input[data-testid="{field_testid}"]').first
+
     try:
         field.click(timeout=4000)
         page.keyboard.press("Control+A")
@@ -195,6 +215,7 @@ def fill_station_field(page: Page, form: Locator, field_testid: str, value: str)
         page.wait_for_timeout(800)
 
         selected = choose_station_option(page, value)
+
         if not selected:
             page.keyboard.press("ArrowDown")
             page.wait_for_timeout(200)
@@ -202,12 +223,15 @@ def fill_station_field(page: Page, form: Locator, field_testid: str, value: str)
             page.wait_for_timeout(500)
 
         current = field.input_value(timeout=2000).strip()
+
         if current:
             return True
 
         page.wait_for_timeout(1000)
         current = field.input_value(timeout=2000).strip()
+
         return bool(current)
+
     except Exception:
         return False
 
@@ -218,16 +242,19 @@ def click_calendar_next(page: Page) -> bool:
         page.locator("button[aria-label*='Next']"),
         page.locator("button").filter(has_text=re.compile(r"^\s*[›>]+\s*$")),
     ]
+
     for locator in candidates:
         item = visible_first(locator, timeout=500)
         if item is None:
             continue
+
         try:
             item.click(timeout=1500)
             page.wait_for_timeout(500)
             return True
         except Exception:
             continue
+
     return False
 
 
@@ -237,6 +264,7 @@ def select_calendar_date(page: Page, travel_date: date) -> bool:
     for _ in range(14):
         exact = page.locator(f'button[data-date="{iso}"], [role="button"][data-date="{iso}"]')
         item = visible_first(exact, timeout=700)
+
         if item is not None:
             try:
                 item.click(timeout=3000)
@@ -248,9 +276,15 @@ def select_calendar_date(page: Page, travel_date: date) -> bool:
         day = str(travel_date.day)
         month = travel_date.strftime("%B")
         year = str(travel_date.year)
-        date_name = re.compile(rf"\b{re.escape(day)}\b.*\b{re.escape(month)}\b.*\b{year}\b", re.I)
+
+        date_name = re.compile(
+            rf"\b{re.escape(day)}\b.*\b{re.escape(month)}\b.*\b{year}\b",
+            re.I,
+        )
+
         aria_match = page.get_by_role("button", name=date_name)
         item = visible_first(aria_match, timeout=700)
+
         if item is not None:
             try:
                 item.click(timeout=3000)
@@ -295,7 +329,9 @@ def set_normal_outbound_date(page: Page, form: Locator, travel_date: date) -> bo
 
     try:
         visible_text = date_button.inner_text(timeout=3000).lower()
-        return travel_date.strftime("%d").lstrip("0") in visible_text and travel_date.strftime("%b").lower() in visible_text
+        day_ok = travel_date.strftime("%d").lstrip("0") in visible_text
+        month_ok = travel_date.strftime("%b").lower() in visible_text
+        return day_ok and month_ok
     except Exception:
         return False
 
@@ -313,6 +349,7 @@ def set_normal_passengers(page: Page, form: Locator, passengers: int) -> None:
 
     for _ in range(max(0, passengers - 1)):
         clicked = False
+
         for locator in [
             page.get_by_role("button", name=re.compile(r"increase.*adult|add.*adult|adult.*increase", re.I)),
             page.locator("button").filter(has_text=re.compile(r"^\s*\+\s*$")),
@@ -320,26 +357,68 @@ def set_normal_passengers(page: Page, form: Locator, passengers: int) -> None:
             item = visible_first(locator, timeout=500)
             if item is None:
                 continue
+
             try:
                 item.click(timeout=1500)
                 clicked = True
                 break
             except Exception:
                 continue
+
         if not clicked:
             break
 
 
 def get_train_form(page: Page) -> Optional[Locator]:
-    forms = page.locator('form[data-testid="booking-magnet-form-trains"]')
-    return visible_first(forms, timeout=1000)
+    """
+    Eurostar often renders multiple booking magnet forms: one in the header and
+    one lower down near the footer. Some copies can be reported as non-visible
+    by Playwright even though the fields are present. Prefer a visible usable
+    form, but fall back to the first form with the expected fields.
+    """
+    selector = 'form[data-testid="booking-magnet-form-trains"]'
+
+    try:
+        page.wait_for_selector(selector, timeout=15000)
+    except Exception:
+        return None
+
+    forms = page.locator(selector)
+
+    try:
+        count = forms.count()
+    except Exception:
+        return None
+
+    for i in range(count):
+        form = forms.nth(i)
+        try:
+            if form.locator('button[data-testid="button-search"]').first.is_visible(timeout=500):
+                return form
+        except Exception:
+            continue
+
+    for i in range(count):
+        form = forms.nth(i)
+        try:
+            has_origin = form.locator('input[data-testid="origin-field"]').count() > 0
+            has_dest = form.locator('input[data-testid="destination-field"]').count() > 0
+            has_date = form.locator('button[data-testid="start-date"]').count() > 0
+            has_search = form.locator('button[data-testid="button-search"]').count() > 0
+
+            if has_origin and has_dest and has_date and has_search:
+                return form
+        except Exception:
+            continue
+
+    return None
 
 
 def click_normal_search(page: Page, form: Locator) -> bool:
     try:
         form.locator('button[data-testid="button-search"]').first.click(timeout=4000)
         safe_wait(page, timeout=12000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(2500)
         return True
     except Exception:
         return False
@@ -367,11 +446,14 @@ def fill_text_field(page: Page, labels: list[str], value: str) -> bool:
     try:
         inputs = page.locator("input:not([type=hidden]):not([type=checkbox]):not([type=radio])")
         count = min(inputs.count(), 8)
+
         for i in range(count):
             el = inputs.nth(i)
+
             try:
                 if el.is_visible():
                     current = el.input_value(timeout=1000)
+
                     if not current:
                         el.fill(value, timeout=2500)
                         page.keyboard.press("Enter")
@@ -432,11 +514,13 @@ def click_search(page: Page) -> bool:
             return True
         except Exception:
             pass
+
     return False
 
 
 def run_with_browser(config: AppConfig) -> list[FareHit]:
     hits: list[FareHit] = []
+
     log("Starting Eurostar fare check")
 
     with sync_playwright() as p:
@@ -444,12 +528,14 @@ def run_with_browser(config: AppConfig) -> list[FareHit]:
             headless=config.settings.headless,
             args=["--disable-dev-shm-usage", "--no-sandbox"],
         )
+
         context = browser.new_context(
             user_agent=config.settings.user_agent,
             viewport={"width": 1365, "height": 900},
             locale="en-GB",
             timezone_id=config.settings.timezone,
         )
+
         context.set_default_timeout(config.settings.page_timeout_ms)
         page = context.new_page()
 
@@ -462,16 +548,19 @@ def run_with_browser(config: AppConfig) -> list[FareHit]:
 
                 if config.checks.get("normal_eurostar", True):
                     hits.extend(check_normal_eurostar(page, route, config))
+
         finally:
             browser.close()
 
     log(f"Finished Eurostar fare check. Hits found: {len(hits)}")
+
     return hits
 
 
 def check_snap(page: Page, route: RouteQuery, config: AppConfig) -> list[FareHit]:
     today = date.today()
     max_snap_date = today + timedelta(days=config.settings.snap_max_days_ahead)
+
     hits: list[FareHit] = []
 
     log(f"Checking Snap for {route.name}")
@@ -480,6 +569,7 @@ def check_snap(page: Page, route: RouteQuery, config: AppConfig) -> list[FareHit
         if travel_date < today:
             log(f"SNAP skip past date: {route.name} {travel_date}")
             continue
+
         if travel_date > max_snap_date:
             log(f"SNAP skip outside Snap window: {route.name} {travel_date}")
             continue
@@ -501,7 +591,9 @@ def check_snap(page: Page, route: RouteQuery, config: AppConfig) -> list[FareHit
             origin_ok = fill_text_field(page, ["from", "origin", "departure"], route.origin)
             dest_ok = fill_text_field(page, ["to", "destination", "arrival"], route.destination)
             date_ok = fill_date_field(page, travel_date)
+
             set_passengers(page, route.passengers)
+
             clicked = click_search(page) if origin_ok and dest_ok and date_ok else False
 
             if not origin_ok or not dest_ok or not date_ok or not clicked:
@@ -526,7 +618,9 @@ def check_snap(page: Page, route: RouteQuery, config: AppConfig) -> list[FareHit
 
             if found_price or availability_words:
                 currency, amount = found_price if found_price else (None, None)
+
                 log(f"SNAP potential hit: {route.name} {travel_date} {currency or ''} {amount or ''}")
+
                 hits.append(
                     FareHit(
                         provider=Provider.SNAP,
@@ -541,12 +635,14 @@ def check_snap(page: Page, route: RouteQuery, config: AppConfig) -> list[FareHit
                         summary="Potential Snap availability found. Open the link and verify before booking.",
                     )
                 )
+
             else:
                 log(f"SNAP checked with no hit: {route.name} {travel_date}")
 
         except PlaywrightTimeoutError:
             log(f"SNAP timeout: {route.name} {travel_date}")
             save_debug(page, f"snap_timeout_{route.name}_{travel_date}", config.settings.debug)
+
         except Exception as exc:
             log(f"SNAP error: {route.name} {travel_date} | {type(exc).__name__}: {exc}")
             save_debug(page, f"snap_error_{route.name}_{travel_date}", config.settings.debug)
@@ -556,6 +652,7 @@ def check_snap(page: Page, route: RouteQuery, config: AppConfig) -> list[FareHit
 
 def check_normal_eurostar(page: Page, route: RouteQuery, config: AppConfig) -> list[FareHit]:
     hits: list[FareHit] = []
+
     threshold = config.normal_eurostar.threshold_amount
     allowed = config.normal_eurostar.allowed_currencies
 
@@ -574,26 +671,34 @@ def check_normal_eurostar(page: Page, route: RouteQuery, config: AppConfig) -> l
             safe_wait(page, timeout=8000)
 
             form = get_train_form(page)
+
             if form is None:
-                log(f"NORMAL form missing: {route.name} {travel_date}")
+                log(f"NORMAL form missing after wait: {route.name} {travel_date}; falling back to body locator")
                 save_debug(page, f"normal_form_missing_{route.name}_{travel_date}", config.settings.debug)
-                continue
+                form = page.locator("body")
 
             origin_ok = fill_station_field(page, form, "origin-field", route.origin)
             dest_ok = fill_station_field(page, form, "destination-field", route.destination)
             date_ok = set_normal_outbound_date(page, form, travel_date)
+
             set_normal_passengers(page, form, route.passengers)
+
             clicked = click_normal_search(page, form) if origin_ok and dest_ok and date_ok else False
 
             if not origin_ok or not dest_ok or not date_ok or not clicked:
                 try:
-                    start_attr = form.locator('button[data-testid="start-date"]').first.get_attribute("data-date", timeout=1000)
+                    start_attr = form.locator('button[data-testid="start-date"]').first.get_attribute(
+                        "data-date",
+                        timeout=1000,
+                    )
                 except Exception:
                     start_attr = "unknown"
+
                 try:
                     origin_value = form.locator('input[data-testid="origin-field"]').first.input_value(timeout=1000)
                 except Exception:
                     origin_value = "unknown"
+
                 try:
                     dest_value = form.locator('input[data-testid="destination-field"]').first.input_value(timeout=1000)
                 except Exception:
@@ -604,6 +709,7 @@ def check_normal_eurostar(page: Page, route: RouteQuery, config: AppConfig) -> l
                     f"origin_ok={origin_ok} dest_ok={dest_ok} date_ok={date_ok} clicked={clicked} "
                     f"origin_value={origin_value!r} dest_value={dest_value!r} start_date_attr={start_attr!r}"
                 )
+
                 save_debug(page, f"normal_form_incomplete_{route.name}_{travel_date}", config.settings.debug)
                 continue
 
@@ -616,10 +722,12 @@ def check_normal_eurostar(page: Page, route: RouteQuery, config: AppConfig) -> l
                 continue
 
             currency, amount = price
+
             log(f"NORMAL cheapest seen: {route.name} {travel_date} {currency} {amount:g}")
 
             if amount <= threshold:
                 log(f"NORMAL threshold hit: {route.name} {travel_date} {currency} {amount:g}")
+
                 hits.append(
                     FareHit(
                         provider=Provider.NORMAL,
@@ -638,6 +746,7 @@ def check_normal_eurostar(page: Page, route: RouteQuery, config: AppConfig) -> l
         except PlaywrightTimeoutError:
             log(f"NORMAL timeout: {route.name} {travel_date}")
             save_debug(page, f"normal_timeout_{route.name}_{travel_date}", config.settings.debug)
+
         except Exception as exc:
             log(f"NORMAL error: {route.name} {travel_date} | {type(exc).__name__}: {exc}")
             save_debug(page, f"normal_error_{route.name}_{travel_date}", config.settings.debug)
