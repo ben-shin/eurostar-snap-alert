@@ -33,7 +33,7 @@ routes:
   - name: "Brussels to London"
     origin: "Brussels Midi"
     destination: "London St Pancras"
-    start_date: "2026-07-27"
+    start_date: "2026-07-24"
     end_date: "2026-07-30"
     passengers: 1
     # Optional direct pages used in notification fallback links.
