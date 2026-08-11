@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -14,11 +15,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check Eurostar Snap and normal fares, then send WhatsApp alerts.")
     parser.add_argument("--config", default="config.yml", help="Path to YAML config file")
     parser.add_argument("--state", default="data/notified.json", help="Path to duplicate-alert state file")
+    parser.add_argument("--report", default="debug/report.json", help="Path to the machine-readable health report")
     parser.add_argument("--dry-run", action="store_true", help="Print matches without sending WhatsApp alerts")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
-    hits = run_with_browser(config)
+    report = run_with_browser(config)
+    report_path = Path(args.report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report.as_dict(), indent=2) + "\n", encoding="utf-8")
+
+    hits = report.hits
     state = AlertState(args.state)
     unseen = state.unseen(hits)
 
@@ -36,8 +43,23 @@ def main(argv: list[str] | None = None) -> int:
         print("Dry run enabled; not sending messages or updating state.")
     else:
         # Ensure the state file exists so the workflow commit step is deterministic.
-        Path(args.state).parent.mkdir(parents=True, exist_ok=True)
         state.save()
+
+    print(
+        "Health: "
+        f"attempted={report.attempted} completed={report.completed} "
+        f"failed={len(report.failures)}"
+    )
+    for failure in report.failures:
+        print(
+            "FAILED: "
+            f"{failure.provider.value} | {failure.route_name} | "
+            f"{failure.travel_date} | {failure.message}"
+        )
+
+    if report.failures:
+        print(f"Scraper health check failed; see {report_path} and uploaded debug artifacts.")
+        return 1
 
     return 0
 
