@@ -12,7 +12,10 @@ class AlertState:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
-            self._seen = set(json.loads(self.path.read_text()).get("seen", []))
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or not isinstance(raw.get("seen", []), list):
+                raise ValueError(f"Invalid alert state file: {self.path}")
+            self._seen = {str(value) for value in raw.get("seen", [])}
         else:
             self._seen = set()
 
@@ -25,4 +28,7 @@ class AlertState:
         self.save()
 
     def save(self) -> None:
-        self.path.write_text(json.dumps({"seen": sorted(self._seen)}, indent=2) + "\n")
+        payload = json.dumps({"seen": sorted(self._seen)}, indent=2) + "\n"
+        temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(self.path)

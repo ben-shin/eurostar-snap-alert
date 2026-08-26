@@ -5,7 +5,8 @@ settings:
   timezone: Europe/London
   headless: true
   debug: true
-  user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36 BenEurostarFareMonitor/0.1"
+  # Leave blank to use Playwright's current browser user agent.
+  user_agent: ""
   # Snap official page says bookings can be made up to 10 days before travel.
   snap_max_days_ahead: 10
   # Be gentle. The workflow already runs every 15 min; don't add internal retry loops.

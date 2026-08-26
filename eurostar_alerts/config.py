@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -44,7 +45,7 @@ class AppConfig:
     routes: list[RouteQuery]
 
 
-def _parse_date(value: str) -> date:
+def _parse_date(value: object) -> date:
     return date.fromisoformat(str(value))
 
 
@@ -53,13 +54,15 @@ def load_config(path: str | Path) -> AppConfig:
     if not p.exists():
         raise FileNotFoundError(f"Config file not found: {p}. Copy config.example.yml to config.yml first.")
 
-    raw: dict[str, Any] = yaml.safe_load(p.read_text())
+    raw: dict[str, Any] = yaml.safe_load(p.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("Config root must be a YAML mapping.")
 
     settings_raw = raw.get("settings", {})
     notification_raw = raw.get("notification", {})
     normal_raw = raw.get("normal_eurostar", {})
 
-    routes = []
+    routes: list[RouteQuery] = []
     for r in raw.get("routes", []):
         passengers = int(r.get("passengers", 1))
         if not 1 <= passengers <= 4:
@@ -81,12 +84,28 @@ def load_config(path: str | Path) -> AppConfig:
             )
         )
 
+    timezone = str(settings_raw.get("timezone", "Europe/London"))
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"Unknown timezone: {timezone}") from exc
+
+    checks = {k: bool(v) for k, v in raw.get("checks", {"snap": True, "normal_eurostar": True}).items()}
+    if not any(checks.get(name, False) for name in ("snap", "normal_eurostar")):
+        raise ValueError("Enable at least one check: snap or normal_eurostar.")
+    if not routes:
+        raise ValueError("Config must contain at least one route.")
+
+    threshold = float(normal_raw.get("threshold_amount", 70))
+    if threshold <= 0:
+        raise ValueError("normal_eurostar.threshold_amount must be positive.")
+
     return AppConfig(
         settings=Settings(
-            timezone=str(settings_raw.get("timezone", "Europe/London")),
+            timezone=timezone,
             headless=bool(settings_raw.get("headless", True)),
             debug=bool(settings_raw.get("debug", True)),
-            user_agent=str(settings_raw.get("user_agent", "BenEurostarFareMonitor/0.1")),
+            user_agent=str(settings_raw.get("user_agent", "")).strip(),
             snap_max_days_ahead=int(settings_raw.get("snap_max_days_ahead", 10)),
             page_timeout_ms=int(settings_raw.get("page_timeout_ms", 45000)),
         ),
@@ -97,9 +116,9 @@ def load_config(path: str | Path) -> AppConfig:
             twilio_from_whatsapp_env=str(notification_raw.get("twilio_from_whatsapp_env", "TWILIO_FROM_WHATSAPP")),
             twilio_to_whatsapp_env=str(notification_raw.get("twilio_to_whatsapp_env", "TWILIO_TO_WHATSAPP")),
         ),
-        checks={k: bool(v) for k, v in raw.get("checks", {"snap": True, "normal_eurostar": True}).items()},
+        checks=checks,
         normal_eurostar=NormalEurostarConfig(
-            threshold_amount=float(normal_raw.get("threshold_amount", 70)),
+            threshold_amount=threshold,
             allowed_currencies={str(c).upper() for c in normal_raw.get("allowed_currencies", ["GBP", "EUR"])},
         ),
         routes=routes,

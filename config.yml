@@ -5,7 +5,7 @@ settings:
   timezone: Europe/London
   headless: true
   debug: true
-  user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36 BenEurostarFareMonitor/0.1"
+  user_agent: ""
   # Snap official page says bookings can be made up to 10 days before travel.
   snap_max_days_ahead: 10
   # Be gentle. The workflow already runs every 15 min; don't add internal retry loops.
@@ -21,7 +21,9 @@ notification:
 
 checks:
   snap: true
-  normal_eurostar: true
+  # Optional comparison fares currently hit Eurostar's generic error page from
+  # automated runners. Keep production focused on the working Snap alert.
+  normal_eurostar: false
 
 normal_eurostar:
   # Notify when a normal one-way Eurostar fare is <= this numeric amount in either GBP or EUR.
@@ -30,11 +32,21 @@ normal_eurostar:
   allowed_currencies: ["GBP", "EUR"]
 
 routes:
-  - name: "London to Brussels"
+  - name: "Brussels to London"
     origin: "Brussels Midi"
     destination: "London St Pancras"
-    start_date: "2026-08-17"
-    end_date: "2026-08-19"
+    start_date: "2026-09-17"
+    end_date: "2026-10-17"
+    passengers: 1
+    # Optional direct pages used in notification fallback links.
+    snap_link: "https://snap.eurostar.com/uk-en"
+    booking_link: "https://www.eurostar.com/uk-en"
+
+  - name: "London to Brussels"
+    origin: "London St Pancras"
+    destination: "Brussels Midi"
+    start_date: "2026-09-10"
+    end_date: "2026-10-10"
     passengers: 1
     # Optional direct pages used in notification fallback links.
     snap_link: "https://snap.eurostar.com/uk-en"

@@ -1,64 +1,74 @@
-# Eurostar Snap + normal fare WhatsApp alerts
+# Eurostar fare alerts
 
-This repository checks:
+A small Playwright monitor for:
 
-1. Eurostar Snap one-way availability for configured route/date windows.
-2. Normal one-way Eurostar fares below a configured threshold, defaulting to 70 in GBP/EUR.
-3. Sends WhatsApp notifications through Twilio.
-4. Runs on GitHub Actions every 15 minutes, with explicit midnight and midday triggers.
+- Eurostar Snap availability on exact configured travel dates.
+- Normal one-way Eurostar fares at or below a configured threshold.
+- WhatsApp notifications through Twilio.
+- Scheduled execution with GitHub Actions.
 
-## Important limitations
+The monitor uses Eurostar's visible booking forms and does not log in, bypass CAPTCHAs, purchase tickets, or automate payment. Eurostar does not provide a simple public consumer fare API, so selectors can still require maintenance when the website changes.
 
-Eurostar does not provide a simple public consumer fare endpoint. This project uses low-frequency Playwright browser automation and text extraction. It does **not** log in, bypass CAPTCHA, automate payment, or purchase tickets. If Eurostar changes its website, selectors may need updating.
+## Reliability model
 
-Use a private repository if your route/date searches are sensitive.
+Each provider/date check must end in one of three states: `available`, `unavailable`, or `failed`. A missing form, rejected date, CAPTCHA, error page, or unrecognised result is a failure—not a successful run with zero fares.
 
-## Setup
+Snap prices are read only from result elements whose `data-testid` contains the requested date. This prevents adjacent-date prices from producing false alerts.
 
-### 1. Copy the config
+Every run writes `debug/report.json`. Failed pages also produce HTML and screenshot diagnostics, which the GitHub workflow uploads as an artifact.
+
+## Configuration
+
+Copy the example and edit the route/date window:
 
 ```bash
 cp config.example.yml config.yml
 ```
 
-Edit `config.yml` with your routes, date ranges, passenger count, and normal fare threshold.
+Important settings:
 
-### 2. Create Twilio WhatsApp credentials
+- `snap_max_days_ahead`: only dates inside this rolling Snap window are checked.
+- `threshold_amount`: alert threshold for normal fares.
+- `allowed_currencies`: currencies accepted by the normal-fare check; no FX conversion is performed.
+- `debug`: capture a screenshot and HTML when a check fails.
 
-For testing, use Twilio's WhatsApp sandbox. Put these in GitHub repo secrets:
+The tracked `config.yml` contains the production searches. Keep the repository private if those searches are sensitive.
 
-- `TWILIO_ACCOUNT_SID`
-- `TWILIO_AUTH_TOKEN`
-- `TWILIO_FROM_WHATSAPP`, e.g. `whatsapp:+14155238886`
-- `TWILIO_TO_WHATSAPP`, e.g. `whatsapp:+447700900000`
-
-### 3. Add GitHub secrets
-
-GitHub repo → Settings → Secrets and variables → Actions → New repository secret.
-
-### 4. Enable workflow write permissions
-
-Repo → Settings → Actions → General → Workflow permissions → **Read and write permissions**.
-
-This lets the workflow update `data/notified.json` so you do not get the same alert every 15 minutes.
-
-### 5. Run manually first
-
-GitHub repo → Actions → Eurostar fare monitor → Run workflow.
-
-## Local test
+## Local setup
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-cp config.example.yml config.yml
-python -m eurostar_alerts.main --config config.yml
+pip install -r requirements-dev.txt
+python -m playwright install chromium
+pytest
+python -m eurostar_alerts.main --config config.yml --dry-run
 ```
 
-Set `settings.headless: false` locally if you want to watch the browser.
+`--dry-run` performs live checks and prints matches without sending WhatsApp messages or updating notification state.
 
-## Notes on duplicate alerts
+## GitHub Actions setup
 
-Alerts are keyed by provider, route, date, passenger count, and price. The state file is committed back to the repo after each successful run.
+Create these repository secrets under **Settings → Secrets and variables → Actions**:
+
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_FROM_WHATSAPP`, for example `whatsapp:+14155238886`
+- `TWILIO_TO_WHATSAPP`, for example `whatsapp:+447700900000`
+
+Set **Settings → Actions → General → Workflow permissions** to **Read and write permissions**. This lets successful notifications update `data/notified.json` to prevent duplicates.
+
+The workflow runs tests on pull requests. Scheduled and manual runs perform live fare checks, upload diagnostics, preserve notification state, and fail visibly if any requested scrape could not be classified.
+
+## Commands
+
+```bash
+# Unit tests
+pytest
+
+# Live check without notifications
+python -m eurostar_alerts.main --config config.yml --dry-run
+
+# Production-equivalent run (requires Twilio environment variables)
+python -m eurostar_alerts.main --config config.yml
+```

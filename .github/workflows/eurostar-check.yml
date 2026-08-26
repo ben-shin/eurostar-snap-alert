@@ -1,40 +1,69 @@
 name: Eurostar fare monitor
 
 on:
+  pull_request:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run live checks without sending WhatsApp or updating state
+        required: true
+        default: true
+        type: boolean
   schedule:
-    # Every 15 minutes.
     - cron: "*/15 * * * *"
 
-    # Explicit midnight and midday UTC anchors.
-    # The 15-minute schedule already includes these, but this makes the intent clear.
-    - cron: "0 0,12 * * *"
-
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: eurostar-fare-monitor-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  check-fares:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-
+  tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Check out repo
-        uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest
+
+  check-fares:
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache Playwright browser
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-chromium-v1.53.0
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: |
-            playwright-${{ runner.os }}-chromium-
+            playwright-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
@@ -43,26 +72,45 @@ jobs:
           python -m playwright install chromium
 
       - name: Run fare checker
+        id: monitor
+        continue-on-error: true
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_FROM_WHATSAPP: ${{ secrets.TWILIO_FROM_WHATSAPP }}
           TWILIO_TO_WHATSAPP: ${{ secrets.TWILIO_TO_WHATSAPP }}
+          MANUAL_DRY_RUN: ${{ inputs.dry_run || false }}
         run: |
-          python -m eurostar_alerts.main --config config.yml
+          args=()
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$MANUAL_DRY_RUN" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          python -m eurostar_alerts.main --config config.yml "${args[@]}"
 
-      - name: Upload debug files
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Upload diagnostics
+        if: steps.monitor.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
         with:
-          name: eurostar-debug
+          name: eurostar-debug-${{ github.run_id }}
           path: debug/
-          if-no-files-found: ignore
+          if-no-files-found: warn
+          retention-days: 1
 
       - name: Commit notification state
+        if: always()
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/notified.json
-          git diff --cached --quiet || git commit -m "Update notified fare state"
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "Update notified fare state"
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi
+
+      - name: Enforce scraper health
+        if: steps.monitor.outcome == 'failure'
+        run: |
+          echo "One or more fare checks could not be classified. See the eurostar-debug artifact."
+          exit 1

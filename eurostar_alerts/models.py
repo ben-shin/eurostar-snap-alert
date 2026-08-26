@@ -11,6 +11,12 @@ class Provider(str, Enum):
     NORMAL = "normal_eurostar"
 
 
+class CheckStatus(str, Enum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class RouteQuery:
     name: str
@@ -50,3 +56,52 @@ class FareHit:
                 price,
             ]
         )
+
+
+@dataclass(frozen=True)
+class CheckOutcome:
+    provider: Provider
+    route_name: str
+    travel_date: date
+    status: CheckStatus
+    message: str
+    hit: Optional[FareHit] = None
+
+
+@dataclass
+class ScrapeReport:
+    outcomes: list[CheckOutcome]
+
+    @property
+    def hits(self) -> list[FareHit]:
+        return [outcome.hit for outcome in self.outcomes if outcome.hit is not None]
+
+    @property
+    def failures(self) -> list[CheckOutcome]:
+        return [outcome for outcome in self.outcomes if outcome.status == CheckStatus.FAILED]
+
+    @property
+    def attempted(self) -> int:
+        return len(self.outcomes)
+
+    @property
+    def completed(self) -> int:
+        return self.attempted - len(self.failures)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "attempted": self.attempted,
+            "completed": self.completed,
+            "failed": len(self.failures),
+            "hits": len(self.hits),
+            "outcomes": [
+                {
+                    "provider": outcome.provider.value,
+                    "route": outcome.route_name,
+                    "date": outcome.travel_date.isoformat(),
+                    "status": outcome.status.value,
+                    "message": outcome.message,
+                }
+                for outcome in self.outcomes
+            ],
+        }
