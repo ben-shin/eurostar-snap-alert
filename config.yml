@@ -35,8 +35,18 @@ routes:
   - name: "Brussels to London"
     origin: "Brussels Midi"
     destination: "London St Pancras"
-    start_date: "2026-08-17"
-    end_date: "2026-08-19"
+    start_date: "2026-09-17"
+    end_date: "2026-10-17"
+    passengers: 1
+    # Optional direct pages used in notification fallback links.
+    snap_link: "https://snap.eurostar.com/uk-en"
+    booking_link: "https://www.eurostar.com/uk-en"
+
+  - name: "London to Brussels"
+    origin: "London St Pancras"
+    destination: "Brussels Midi"
+    start_date: "2026-09-10"
+    end_date: "2026-10-10"
     passengers: 1
     # Optional direct pages used in notification fallback links.
     snap_link: "https://snap.eurostar.com/uk-en"

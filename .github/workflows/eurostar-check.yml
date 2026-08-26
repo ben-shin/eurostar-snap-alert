@@ -88,13 +88,14 @@ jobs:
           python -m eurostar_alerts.main --config config.yml "${args[@]}"
 
       - name: Upload diagnostics
-        if: always()
+        if: steps.monitor.outcome == 'failure'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: eurostar-debug-${{ github.run_id }}
           path: debug/
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 1
 
       - name: Commit notification state
         if: always()
