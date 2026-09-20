@@ -38,6 +38,7 @@
     "snap|Brussels to London|Brussels Midi|London St Pancras|2026-09-27|1|GBP40.00",
     "snap|Brussels to London|Brussels Midi|London St Pancras|2026-09-27|1|GBP45.00",
     "snap|Brussels to London|Brussels Midi|London St Pancras|2026-09-27|1|GBP55.00",
+    "snap|Brussels to London|Brussels Midi|London St Pancras|2026-09-27|1|GBP65.00",
     "snap|Brussels to London|Brussels Midi|London St Pancras|2026-09-28|1|GBP45.00",
     "snap|Brussels to London|Brussels Midi|London St Pancras|2026-09-28|1|GBP55.00",
     "snap|Brussels to London|Brussels Midi|London St Pancras|2026-09-29|1|GBP40.00",
@@ -87,6 +88,7 @@
     "snap|London to Brussels|London St Pancras|Brussels Midi|2026-09-26|1|GBP45.00",
     "snap|London to Brussels|London St Pancras|Brussels Midi|2026-09-27|1|GBP65.00",
     "snap|London to Brussels|London St Pancras|Brussels Midi|2026-09-28|1|GBP45.00",
+    "snap|London to Brussels|London St Pancras|Brussels Midi|2026-09-28|1|GBP55.00",
     "snap|London to Brussels|London St Pancras|Brussels Midi|2026-09-29|1|GBP35.00",
     "snap|London to Brussels|London St Pancras|Brussels Midi|2026-09-30|1|GBP35.00"
   ]
