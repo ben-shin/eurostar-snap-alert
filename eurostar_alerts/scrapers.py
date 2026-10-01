@@ -540,7 +540,9 @@ def run_with_browser(config: AppConfig) -> ScrapeReport:
                 for travel_date in date_range(route.start_date, route.end_date):
                     if travel_date < today:
                         continue
-                    if config.checks.get("snap", True) and travel_date <= max_snap_date:
+                    # Snap's calendar starts tomorrow; today's date is disabled.
+                    # Normal fares can still be checked for same-day travel.
+                    if config.checks.get("snap", True) and today < travel_date <= max_snap_date:
                         page = _new_page(context, config.settings.page_timeout_ms)
                         try:
                             outcomes.append(_check_snap(page, route, travel_date, config))

@@ -27,7 +27,7 @@ cp config.example.yml config.yml
 
 Important settings:
 
-- `snap_max_days_ahead`: only dates inside this rolling Snap window are checked.
+- `snap_max_days_ahead`: Snap checks run from tomorrow through this many days ahead (inclusive). Snap disables same-day departures; normal-fare checks still include today.
 - `threshold_amount`: alert threshold for normal fares.
 - `allowed_currencies`: currencies accepted by the normal-fare check; no FX conversion is performed.
 - `debug`: capture a screenshot and HTML when a check fails.
