@@ -65,7 +65,7 @@ def main():
     service_context = client.serverless.v1.services(service.sid)
     environment = find_or_create(
         service_context.environments, lambda item: item.unique_name == "production",
-        unique_name="production", domain_suffix="",
+        unique_name="production", domain_suffix="prod",
     )
     environment_context = service_context.environments(environment.sid)
     variables = {item.key: item for item in environment_context.variables.stream()}
