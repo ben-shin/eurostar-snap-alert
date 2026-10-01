@@ -41,6 +41,10 @@ class FareHit:
     currency: Optional[str]
     booking_url: str
     summary: str
+    departure_time: Optional[str] = None
+    arrival_time: Optional[str] = None
+    departure_window: Optional[str] = None
+    duration: Optional[str] = None
 
     @property
     def dedupe_key(self) -> str:

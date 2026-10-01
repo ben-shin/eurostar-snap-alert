@@ -9,7 +9,7 @@ from .models import FareHit, Provider
 from .state import AlertState
 
 
-def format_hit(hit: FareHit) -> str:
+def format_hit(hit: FareHit, include_details: bool = True) -> str:
     provider = "Eurostar Snap" if hit.provider == Provider.SNAP else "Normal Eurostar"
     if hit.price_amount is None:
         price = "Snap fare available"
@@ -17,16 +17,28 @@ def format_hit(hit: FareHit) -> str:
         symbol = "£" if hit.currency == "GBP" else "€" if hit.currency == "EUR" else f"{hit.currency or ''} "
         price = f"{symbol}{hit.price_amount:g}"
 
-    return (
-        f"🚄 {provider} alert\n"
-        f"{hit.route_name}\n"
-        f"{hit.origin} → {hit.destination}\n"
-        f"Date: {hit.travel_date.isoformat()}\n"
-        f"Passengers: {hit.passengers}\n"
-        f"Price: {price}\n"
-        f"{hit.summary}\n"
-        f"Book/check: {hit.booking_url}"
-    )
+    lines = [
+        f"🚄 {provider} alert",
+        hit.route_name,
+        f"{hit.origin} → {hit.destination}",
+        f"Date: {hit.travel_date.isoformat()}",
+        f"Passengers: {hit.passengers}",
+        f"Price: {price}",
+    ]
+    if include_details:
+        if hit.provider == Provider.SNAP:
+            if hit.departure_window:
+                lines.append(f"Departure window: {hit.departure_window} ({hit.origin} local time)")
+            lines.append("Departure/arrival: assigned by Eurostar; not available at booking")
+        elif hit.departure_time and hit.arrival_time:
+            lines.append(f"Departure: {hit.departure_time} ({hit.origin} local time)")
+            lines.append(f"Arrival: {hit.arrival_time} ({hit.destination} local time)")
+            if hit.duration:
+                lines.append(f"Duration: {hit.duration}")
+        else:
+            lines.append("Departure/arrival: not provided in this result")
+    lines.extend([hit.summary, f"Book/check: {hit.booking_url}"])
+    return "\n".join(lines)
 
 
 def twilio_client(config: NotificationConfig):
@@ -57,22 +69,30 @@ def restore_failed_alerts(config: NotificationConfig, hits: Iterable[FareHit], s
     """Repair old dedupe entries only when Twilio proves the matching alert failed."""
     hits = list(hits)
     unseen_keys = {hit.dedupe_key for hit in state.unseen(hits)}
-    candidates = {format_hit(hit): hit for hit in hits if hit.dedupe_key not in unseen_keys}
+    candidates = {
+        body: hit
+        for hit in hits if hit.dedupe_key not in unseen_keys
+        for body in (format_hit(hit), format_hit(hit, include_details=False))
+    }
     if not candidates:
         return
     client, from_number, to_number = twilio_client(config)
     latest = {}
-    delivered = set()
+    delivered_keys = set()
     for message in client.messages.list(from_=from_number, to=to_number, limit=500):
         if message.body not in candidates or message.date_created is None:
             continue
         if message.status in {"delivered", "read"}:
-            delivered.add(message.body)
+            delivered_keys.add(candidates[message.body].dedupe_key)
         previous = latest.get(message.body)
         if previous is None or message.date_created > previous.date_created:
             latest[message.body] = message
-    failed = [candidates[body] for body, message in latest.items()
-              if message.status in {"failed", "undelivered"} and body not in delivered]
+    failed = list({
+        candidates[body].dedupe_key: candidates[body]
+        for body, message in latest.items()
+        if message.status in {"failed", "undelivered"}
+        and candidates[body].dedupe_key not in delivered_keys
+    }.values())
     count = state.restore_failed(failed)
     if count:
         print(f"Restored {count} alerts whose previous delivery Twilio confirmed had failed.")

@@ -380,6 +380,65 @@ def _failed(provider: Provider, route: RouteQuery, travel_date: date, message: s
     return CheckOutcome(provider, route.name, travel_date, CheckStatus.FAILED, message)
 
 
+def _snap_price_and_window(price_elements: Locator) -> Optional[tuple[str, float, Optional[str]]]:
+    """Read a price and departure window from the same exact-date Snap slot."""
+    candidates: list[tuple[str, float, Optional[str]]] = []
+    for index in range(price_elements.count()):
+        price_element = price_elements.nth(index)
+        prices = parse_prices(price_element.inner_text())
+        if not prices:
+            continue
+        slot_text = price_element.locator("xpath=..").inner_text()
+        window_match = re.search(
+            r"Leaving between\s*(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})",
+            slot_text,
+            flags=re.I,
+        )
+        window = (
+            f"{window_match.group(1)}-{window_match.group(2)}" if window_match else None
+        )
+        for currency, amount in prices:
+            if currency in {"GBP", "EUR"} and 1 <= amount <= 500:
+                candidates.append((currency, amount, window))
+    return min(candidates, key=lambda item: item[1]) if candidates else None
+
+
+def _normal_journey_details(page: Page, price: tuple[str, float]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Use times only when the winning price has one unambiguous journey card."""
+    details: list[Optional[tuple[str, str, Optional[str]]]] = []
+    for element in page.locator('[data-testid*="price" i]').all():
+        if not element.is_visible() or price not in parse_prices(element.inner_text()):
+            continue
+        card = element.evaluate(
+            """(node) => {
+                const card = node.parentElement?.closest(
+                    '[data-testid*="journey" i], [data-testid*="train-card" i], [data-testid*="train-result" i]'
+                );
+                if (!card) return null;
+                const read = (name) => card.querySelector('[data-testid="' + name + '"]')?.textContent?.trim() || null;
+                return [read('departure-time'), read('arrival-time'), read('duration')];
+            }"""
+        )
+        if not card:
+            details.append(None)
+            continue
+        departure, arrival, duration = card
+        if not departure or not arrival:
+            details.append(None)
+            continue
+        departure_match = re.fullmatch(r"\s*(\d{1,2}:\d{2})\s*", departure)
+        arrival_match = re.fullmatch(r"\s*(\d{1,2}:\d{2})\s*", arrival)
+        if not departure_match or not arrival_match:
+            details.append(None)
+            continue
+        duration = duration if duration and re.fullmatch(r"\d+h(?:\s*\d+m)?|\d+m", duration) else None
+        details.append((departure_match.group(1), arrival_match.group(1), duration))
+    unique = set(details)
+    if len(unique) == 1 and None not in unique:
+        return next(iter(unique))
+    return None, None, None
+
+
 def _check_snap(page: Page, route: RouteQuery, travel_date: date, config: AppConfig) -> CheckOutcome:
     form, problem = _open_and_fill(page, route, travel_date, Provider.SNAP)
     if form is None:
@@ -412,13 +471,12 @@ def _check_snap(page: Page, route: RouteQuery, travel_date: date, config: AppCon
 
     iso = travel_date.isoformat()
     price_elements = page.locator(f'[data-testid^="{iso}-outbound-"][data-testid$="-price"]')
-    price_texts = price_elements.all_inner_texts()
-    price = cheapest_allowed_price(price_texts, {"GBP", "EUR"})
-    if price is None:
+    fare = _snap_price_and_window(price_elements)
+    if fare is None:
         _save_debug(page, f"snap_unrecognized_{route.name}_{travel_date}", config.settings.debug)
         return _failed(Provider.SNAP, route, travel_date, "result contained neither exact-date fares nor unavailability")
 
-    currency, amount = price
+    currency, amount, departure_window = fare
     hit = FareHit(
         provider=Provider.SNAP,
         route_name=route.name,
@@ -430,6 +488,7 @@ def _check_snap(page: Page, route: RouteQuery, travel_date: date, config: AppCon
         currency=currency,
         booking_url=page.url,
         summary="Exact-date Snap availability found. Verify the fare before booking.",
+        departure_window=departure_window,
     )
     log(f"SNAP available: {route.name} {travel_date} {currency} {amount:g}")
     return CheckOutcome(Provider.SNAP, route.name, travel_date, CheckStatus.AVAILABLE, f"{currency} {amount:g}", hit)
@@ -493,6 +552,7 @@ def _check_normal(page: Page, route: RouteQuery, travel_date: date, config: AppC
             f"cheapest {currency} {amount:g} exceeds threshold",
         )
 
+    departure_time, arrival_time, duration = _normal_journey_details(page, price)
     hit = FareHit(
         provider=Provider.NORMAL,
         route_name=route.name,
@@ -504,6 +564,9 @@ def _check_normal(page: Page, route: RouteQuery, travel_date: date, config: AppC
         currency=currency,
         booking_url=page.url,
         summary=f"Normal one-way fare is at or below {config.normal_eurostar.threshold_amount:g}.",
+        departure_time=departure_time,
+        arrival_time=arrival_time,
+        duration=duration,
     )
     log(f"NORMAL available: {route.name} {travel_date} {currency} {amount:g}")
     return CheckOutcome(Provider.NORMAL, route.name, travel_date, CheckStatus.AVAILABLE, f"{currency} {amount:g}", hit)

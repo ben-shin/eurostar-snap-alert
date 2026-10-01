@@ -128,6 +128,199 @@ function applyCommand(original, body, now = new Date()) {
   return { data, changed: true, reply: action === "DELETE" ? "Deleted " + id : describe(search, today) + (data.enabled ? "" : "\nGlobal scanning is OFF.") };
 }
 
+
+const MENU = "Hi! I can watch Eurostar fares for you.\n1 Add a search\n2 My searches\n3 Pause all alerts\n4 Resume all alerts\n5 Help\nReply with a number, or send MENU anytime.";
+const CITY_KEYS = Object.keys(STATIONS), FIELDS = ["from","to","start","end","passengers","mode","max"];
+const SESSION_MS = 30 * 60 * 1000;
+function choose(text, options) {
+  const input = text.trim().toLowerCase(), n = Number(input);
+  return /^[1-9]$/.test(input) && n <= options.length ? n - 1 :
+    options.findIndex((option) => option.toLowerCase() === input);
+}
+function answer(field, text, draft) {
+  const value = text.trim();
+  if (field === "from" || field === "to") {
+    const index = choose(value, CITY_KEYS);
+    if (index < 0) throw Error("Choose a city by number or name.");
+    if (draft[field === "from" ? "to" : "from"] === CITY_KEYS[index]) throw Error("Choose two different cities.");
+    return CITY_KEYS[index];
+  }
+  if (field === "start" || field === "end") {
+    const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value);
+    const date = match ? [match[3],match[2].padStart(2,"0"),match[1].padStart(2,"0")].join("-") : value;
+    if (!validDate(date)) throw Error("Send a real date, like 05/10/2026 or 2026-10-05.");
+    return date;
+  }
+  if (field === "passengers") {
+    if (!/^[1-4]$/.test(value)) throw Error("Reply 1, 2, 3 or 4.");
+    return Number(value);
+  }
+  if (field === "mode") {
+    const index = choose(value, ["snap","normal","both"]);
+    if (index < 0) throw Error("Reply 1 for Snap, 2 for normal, or 3 for both.");
+    return ["snap","normal","both"][index];
+  }
+  if (!/^\d+(\.\d{1,2})?$/.test(value) || Number(value) <= 0 || Number(value) > 500)
+    throw Error("Send an amount above 0 and at most 500, like 45.50.");
+  return Number(value);
+}
+function steps(draft) {
+  return ["from","to","start","end","passengers","mode",...(draft.mode && draft.mode !== "snap" ? ["max"] : [])];
+}
+function summary(draft) {
+  return (draft.from ? STATIONS[draft.from] : draft.origin) + " -> " +
+    (draft.to ? STATIONS[draft.to] : draft.destination) + "\n" +
+    (draft.start || draft.start_date) + " to " + (draft.end || draft.end_date) +
+    "; " + draft.passengers + " passenger(s)\n" + draft.mode + " fares" +
+    (draft.mode === "snap" ? "" : "; max " + draft.max + " GBP/EUR");
+}
+function prompt(session, data, today) {
+  if (session.stage === "add" || session.stage === "value") {
+    const field = session.stage === "add" ? session.step : session.field;
+    const labels = {
+      from:"Where will you leave from?",to:"Where are you going?",
+      start:"First travel date? Send DD/MM/YYYY.",end:"Last travel date? Send DD/MM/YYYY.",
+      passengers:"How many passengers? Reply 1, 2, 3 or 4.",
+      mode:"Which fares? 1 Snap, 2 normal, 3 both.",
+      max:"Highest normal fare to alert you about? Send 1 to 500 (GBP/EUR)."
+    };
+    return labels[field] + (["from","to"].includes(field) ?
+      "\n1 London  2 Brussels  3 Paris\n4 Amsterdam  5 Rotterdam  6 Lille" : "") +
+      "\nSend BACK or CANCEL anytime.";
+  }
+  if (session.stage === "select") return data.searches.length ?
+    "Which search? Reply with its number:\n" + data.searches.map((s,i) =>
+      (i+1) + " " + s.origin + " -> " + s.destination + " (" + status(s,today) + ")").join("\n") +
+      "\nSend BACK for the menu." : "You have no searches yet. Send MENU to add one.";
+  const search = data.searches.find((s) => s.id === session.search_id);
+  if (session.stage === "action") return search.origin + " -> " + search.destination +
+    "\n1 Edit\n2 " + (search.enabled ? "Pause" : "Resume") +
+    "\n3 Delete\n4 Details\nReply with a number, BACK or CANCEL.";
+  if (session.stage === "field") return "What would you like to change?\n1 From  2 To\n3 First date  4 Last date\n5 Passengers  6 Fare type\n7 Max normal fare\nReply with a number or BACK.";
+  if (session.stage === "confirm_add") return "Add this search?\n" + summary(session.draft) + "\nReply YES or NO. Send BACK to edit.";
+  if (session.stage === "confirm_edit") return "Save this change?\n" + summary({...search,...session.draft}) +
+    "\nReply YES or NO. Send BACK to choose a field.";
+  if (session.stage === "confirm_delete") return "Delete " + search.origin + " -> " + search.destination +
+    "? This cannot be undone. Reply YES or NO, or BACK.";
+  return MENU;
+}
+function saved(data, owner, session, reply) {
+  data.conversations = session ? {[owner]:session} : {};
+  return {data,changed:true,reply};
+}
+function applyInput(original, body, owner, now = new Date()) {
+  const data = JSON.parse(JSON.stringify(original));
+  if (data.version !== 1 || !Array.isArray(data.searches)) throw Error("Invalid control document.");
+  const input = String(body || "").trim(), lower = input.toLowerCase(), today = todayIn(data.timezone,now);
+  let session = data.conversations?.[owner];
+  if (!session || session.expires_at <= now.getTime()) session = null;
+  if (/^(scan|search|status|test)(\s|$)/i.test(input)) {
+    const result = applyCommand(data,input,now);
+    return saved(result.data,owner,null,result.reply);
+  }
+  if (["hi","hello","hey","menu","help","cancel"].includes(lower))
+    return saved(data,owner,null,(lower === "cancel" ? "Cancelled.\n" : "") + MENU);
+  if (lower === "commands") return saved(data,owner,null,HELP);
+  if (lower === "back" && session) {
+    if (session.stage === "add") {
+      const i = steps(session.draft).indexOf(session.step);
+      if (i <= 0) return saved(data,owner,null,MENU);
+      session.step = steps(session.draft)[i-1];
+    } else if (session.stage === "confirm_add") {
+      session.stage = "add"; session.step = steps(session.draft).at(-1);
+    } else if (session.stage === "select") return saved(data,owner,null,MENU);
+    else if (session.stage === "action") session.stage = "select";
+    else if (session.stage === "field") session.stage = "action";
+    else if (["value","confirm_edit"].includes(session.stage)) session.stage = "field";
+    else if (session.stage === "confirm_delete") session.stage = "action";
+    session.expires_at = now.getTime()+SESSION_MS;
+    return saved(data,owner,session,prompt(session,data,today));
+  }
+  if (!session) {
+    const aliases = {add:"add a search",searches:"my searches",pause:"pause all alerts",resume:"resume all alerts"};
+    const option = choose(aliases[lower] || lower,["add a search","my searches","pause all alerts","resume all alerts","help"]);
+    if (option === 0) {
+      if (data.searches.length >= 8) return saved(data,owner,null,"You have 8 searches already. Delete one first.\n"+MENU);
+      session = {stage:"add",step:"from",draft:{passengers:1,mode:"snap",max:60}};
+    } else if (option === 1) session = {stage:"select"};
+    else if (option === 2 || option === 3) {
+      data.enabled = option === 3;
+      return saved(data,owner,null,data.enabled ?
+        "Alerts resumed. Active searches run on the next scheduled scan.\nSend MENU for more choices." :
+        "All fare alerts paused. An in-flight check may finish.\nSend MENU for more choices.");
+    } else if (option === 4) return saved(data,owner,null,MENU+"\nSend COMMANDS for older text commands. Scans run about every 15 minutes.");
+    else return saved(data,owner,null,(lower === "back" ? "That conversation has ended.\n" : "I didn't catch that.\n")+MENU);
+    session.expires_at = now.getTime()+SESSION_MS;
+    return saved(data,owner,session,prompt(session,data,today));
+  }
+  session.expires_at = now.getTime()+SESSION_MS;
+  if (session.stage === "add" || session.stage === "value") {
+    const field = session.stage === "add" ? session.step : session.field;
+    try { session.draft[field] = answer(field,input,session.draft); }
+    catch(error) { return saved(data,owner,session,error.message+"\n"+prompt(session,data,today)); }
+    if (session.stage === "value") session.stage = "confirm_edit";
+    else {
+      const ordered = steps(session.draft), i = ordered.indexOf(field);
+      if (i === ordered.length-1) session.stage = "confirm_add";
+      else session.step = ordered[i+1];
+    }
+    return saved(data,owner,session,prompt(session,data,today));
+  }
+  if (session.stage === "select") {
+    const index = choose(input,data.searches.map((s)=>s.id));
+    if (index < 0) return saved(data,owner,session,"Please reply with a search number.\n"+prompt(session,data,today));
+    session.stage = "action"; session.search_id = data.searches[index].id;
+    return saved(data,owner,session,prompt(session,data,today));
+  }
+  const search = data.searches.find((s)=>s.id === session.search_id);
+  if (!search && session.stage !== "confirm_add") return saved(data,owner,null,"That search is no longer here.\n"+MENU);
+  if (session.stage === "action") {
+    const option = choose(input,["edit",search.enabled ? "pause" : "resume","delete","details"]);
+    if (option === 0) { session.stage="field"; session.draft={}; }
+    else if (option === 1) {
+      if (!search.enabled && search.end_date < today) return saved(data,owner,session,
+        "This search expired. Edit its dates before resuming.\n"+prompt(session,data,today));
+      search.enabled = !search.enabled;
+      return saved(data,owner,null,"Search "+(search.enabled ? "resumed: " : "paused: ")+
+        search.origin+" -> "+search.destination+".\nSend MENU for more choices.");
+    } else if (option === 2) session.stage="confirm_delete";
+    else if (option === 3) return saved(data,owner,session,summary(search)+"\n"+prompt(session,data,today));
+    else return saved(data,owner,session,"Please choose 1, 2, 3 or 4.\n"+prompt(session,data,today));
+    return saved(data,owner,session,prompt(session,data,today));
+  }
+  if (session.stage === "field") {
+    const index = choose(input,FIELDS);
+    if (index < 0) return saved(data,owner,session,"Please choose a field from 1 to 7.\n"+prompt(session,data,today));
+    session.field=FIELDS[index]; session.stage="value";
+    return saved(data,owner,session,prompt(session,data,today));
+  }
+  if (["confirm_add","confirm_edit","confirm_delete"].includes(session.stage)) {
+    if (["no","n"].includes(lower)) return saved(data,owner,null,"No changes made.\n"+MENU);
+    if (!["yes","y"].includes(lower)) return saved(data,owner,session,"Please reply YES or NO.\n"+prompt(session,data,today));
+    if (session.stage === "confirm_delete") {
+      data.searches=data.searches.filter((s)=>s.id !== session.search_id);
+      return saved(data,owner,null,"Deleted "+search.origin+" -> "+search.destination+".\n"+MENU);
+    }
+    try {
+      if (session.stage === "confirm_add") {
+        if (data.searches.length >= 8) throw Error("You have 8 searches already. Delete one first.");
+        const item=editSearch({id:"s"+data.next_id,enabled:true,passengers:1,mode:"snap",max:60},session.draft,today);
+        data.next_id++; data.searches.push(item);
+        return saved(data,owner,null,"Added your search. "+
+          (data.enabled ? "It will run on the next scheduled scan." : "Alerts are paused; resume from MENU.")+"\n"+MENU);
+      }
+      const updated=editSearch({...search},session.draft,today);
+      data.searches=data.searches.map((s)=>s.id === updated.id ? updated : s);
+      return saved(data,owner,null,"Saved your search.\n"+MENU);
+    } catch(error) {
+      session.stage=session.stage === "confirm_add" ? "add" : "field";
+      if (session.stage === "add") session.step=session.draft.end ? "end" : "start";
+      return saved(data,owner,session,error.message+"\n"+prompt(session,data,today));
+    }
+  }
+  return saved(data,owner,null,MENU);
+}
+
 exports.handler = async function(context, event, callback) {
   const twiml = new Twilio.twiml.MessagingResponse();
   if (event.From !== context.OWNER_WHATSAPP || event.To !== context.BOT_WHATSAPP ||
@@ -139,7 +332,7 @@ exports.handler = async function(context, event, callback) {
       const current = await document.fetch();
       if ((current.data.processed || []).includes(event.MessageSid)) return callback(null, twiml);
       let result;
-      try { result = applyCommand(current.data, event.Body); }
+      try { result = applyInput(current.data, event.Body, event.From); }
       catch (error) {
         twiml.message(error.message);
         return callback(null, twiml);
@@ -167,4 +360,5 @@ exports.handler = async function(context, event, callback) {
   }
 };
 exports.applyCommand = applyCommand;
+exports.applyInput = applyInput;
 exports.todayIn = todayIn;

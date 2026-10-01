@@ -74,3 +74,109 @@ test("webhook checks owner, deduplicates retries and uses conditional writes", a
   assert.equal((await invoke(event)).messages.length, 0);
   assert.equal(writes, 1);
 });
+
+const { applyInput } = require("../twilio/commands");
+const owner = "whatsapp:+440000000001";
+function journey(state = initial(), at = now) {
+  const replies = [];
+  return {
+    get data() { return state; },
+    get replies() { return replies; },
+    say(message) {
+      const result = applyInput(state, message, owner, at);
+      state = result.data;
+      replies.push(result.reply);
+      return result.reply;
+    }
+  };
+}
+test("guided add collects one answer at a time and saves only after confirmation", () => {
+  const chat = journey();
+  assert.match(chat.say("Hi"), /1 Add a search/);
+  assert.match(chat.say("1"), /leave from/);
+  assert.match(chat.say("Moon"), /Choose a city/);
+  assert.match(chat.say("2"), /going/);
+  assert.match(chat.say("1"), /First travel date/);
+  assert.match(chat.say("02\/10\/2026"), /Last travel date/);
+  chat.say("10/10/2026");
+  chat.say("2");
+  assert.match(chat.say("3"), /Highest normal fare/);
+  assert.match(chat.say("45.50"), /Add this search/);
+  assert.equal(chat.data.searches.length, 0);
+  assert.match(chat.say("perhaps"), /YES or NO/);
+  assert.equal(chat.data.searches.length, 0);
+  assert.match(chat.say("yes"), /Added your search/);
+  assert.equal(chat.data.searches[0].origin, "Brussels Midi");
+  assert.equal(chat.data.searches[0].destination, "London St Pancras");
+  assert.equal(chat.data.searches[0].start_date, "2026-10-02");
+  assert.equal(chat.data.searches[0].passengers, 2);
+  assert.equal(chat.data.searches[0].mode, "both");
+  assert.equal(chat.data.searches[0].max, 45.5);
+  assert.equal(chat.data.conversations[owner], undefined);
+});
+test("guided back and cancel discard a draft; expired session restarts helpfully", () => {
+  const chat = journey();
+  chat.say("1");
+  chat.say("2");
+  assert.match(chat.say("back"), /leave from/);
+  chat.say("1");
+  assert.match(chat.say("cancel"), /Cancelled/);
+  assert.equal(chat.data.searches.length, 0);
+  const expired = applyInput(chat.data, "1", owner, now).data;
+  assert.equal(expired.conversations[owner].stage, "add");
+  const later = new Date(now.getTime() + 31 * 60 * 1000);
+  const result = applyInput(expired, "Brussels", owner, later);
+  assert.match(result.reply, /I didn't catch that/);
+  assert.equal(result.data.conversations[owner], undefined);
+});
+test("guided edit and delete require confirmation; invalid edit does not change a search", () => {
+  const chat = journey(add());
+  const before = JSON.stringify(chat.data.searches);
+  chat.say("2"); chat.say("1"); chat.say("1"); chat.say("4");
+  assert.match(chat.say("30/02/2027"), /real date/);
+  assert.equal(JSON.stringify(chat.data.searches), before);
+  assert.match(chat.say("12/10/2026"), /Save this change/);
+  assert.equal(JSON.stringify(chat.data.searches), before);
+  assert.match(chat.say("no"), /No changes made/);
+  assert.equal(JSON.stringify(chat.data.searches), before);
+  chat.say("2"); chat.say("1"); chat.say("1"); chat.say("4");
+  chat.say("12/10/2026"); chat.say("yes");
+  assert.equal(chat.data.searches[0].end_date, "2026-10-12");
+  chat.say("2"); chat.say("1");
+  assert.match(chat.say("2"), /paused/);
+  assert.equal(chat.data.searches[0].enabled, false);
+  chat.say("2"); chat.say("1");
+  assert.match(chat.say("2"), /resumed/);
+  chat.say("2"); chat.say("1"); chat.say("3");
+  assert.match(chat.say("back"), /Delete/);
+  chat.say("3");
+  assert.match(chat.say("no"), /No changes made/);
+  assert.equal(chat.data.searches.length, 1);
+  chat.say("2"); chat.say("1"); chat.say("3"); chat.say("yes");
+  assert.equal(chat.data.searches.length, 0);
+});
+test("guided expired search cannot resume until its dates are edited", () => {
+  const state = add();
+  state.searches[0].end_date = "2026-09-30";
+  state.searches[0].enabled = false;
+  const chat = journey(state);
+  chat.say("2"); chat.say("1");
+  assert.match(chat.say("2"), /expired/);
+  assert.equal(chat.data.searches[0].enabled, false);
+  chat.say("1"); chat.say("4"); chat.say("10/10/2026");
+  assert.match(chat.say("yes"), /Saved your search/);
+  chat.say("2"); chat.say("1");
+  assert.match(chat.say("2"), /resumed/);
+});
+test("legacy commands still work and interrupt an unfinished conversation", () => {
+  const chat = journey();
+  chat.say("1");
+  assert.match(chat.say("SEARCH ADD from=Brussels to=London start=2026-10-02 end=2026-10-10"), /Added s1/);
+  assert.equal(chat.data.searches.length, 1);
+  assert.equal(chat.data.conversations[owner], undefined);
+  assert.match(chat.say("SCAN STOP"), /paused/);
+  assert.match(chat.say("STATUS"), /Scanning OFF/);
+  assert.match(chat.say("HELP"), /Add a search/);
+  assert.match(chat.say("COMMANDS"), /SEARCH ADD/);
+  assert.match(chat.say("My searches"), /Which search/);
+});

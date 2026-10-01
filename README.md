@@ -91,28 +91,41 @@ Messaging → Try it out → Send a WhatsApp message → Sandbox settings →
 **When a message comes in**, select **POST**, and save. For a production WhatsApp
 sender, set its inbound webhook instead. No computer needs to stay on.
 
-Send these messages from your configured phone:
+Send **Hi** or **MENU** to get short numbered choices. You can add a search, view
+searches, or pause and resume all alerts by replying with a number or the choice
+name. Adding a search asks for the departure city, arrival city, first and last
+travel dates, passengers, fare type, and (for normal fares) maximum price, one
+answer at a time. Dates accept DD/MM/YYYY or YYYY-MM-DD. A summary asks for
+**YES** before saving. **My searches** lets you select a search by number and
+edit, pause, resume, view, or delete it. Edits and deletions ask for confirmation.
+Send **BACK** to return to the previous choice, **CANCEL** to discard the current
+conversation, or **MENU** to start over. An unfinished conversation expires after
+30 minutes; saved searches are unaffected. Bare **STOP** disconnects the WhatsApp
+Sandbox, so use menu choice 3 or **SCAN STOP** to pause alerts.
+
+The older text commands still work. Send **COMMANDS** for their syntax:
 
 | Message | Effect |
 | --- | --- |
-| HELP | Commands and available city names |
-| TEST | Immediate reply proving inbound commands work |
-| STATUS or SEARCH LIST | Show IDs, parameters and active/paused/expired searches |
-| SCAN STOP | Pause all scans and fare alerts |
-| SCAN START | Resume active, unexpired searches |
-| SEARCH STOP s1 | Pause one search |
-| SEARCH START s1 | Resume one search |
-| SEARCH DELETE s1 | Remove one search |
+| TEST | Immediate webhook check |
+| STATUS or SEARCH LIST | Show search settings and status |
+| SCAN STOP / SCAN START | Pause or resume all alerts |
+| SEARCH STOP s1 / SEARCH START s1 | Pause or resume one search |
+| SEARCH DELETE s1 | Delete one search |
+| SEARCH ADD from=Brussels to=London start=2026-10-05 end=2026-10-10 | Add a search |
+| SEARCH SET s1 end=2026-10-12 passengers=2 max=60 mode=snap | Edit a search |
 
-Add or edit with key=value fields (city names are case-insensitive):
+Supported cities are London, Brussels, Paris, Amsterdam, Rotterdam and Lille.
+Fare type is snap, normal or both. The maximum price applies to normal fares in
+the configured currencies; no FX conversion is performed. Normal-fare scraping
+remains optional and may fail when Eurostar serves its generic automated-runner
+error page.
 
-    SEARCH ADD from=Brussels to=London start=2026-10-05 end=2026-10-10
-    SEARCH SET s1 start=2026-10-06 end=2026-10-12 passengers=2 max=60 mode=snap
-
-Supported cities: London, Brussels, Paris, Amsterdam, Rotterdam and Lille.
-mode is snap, normal or both. max applies to normal fares in the configured
-currencies; no FX conversion is performed. Normal-fare scraping remains optional
-and may fail when Eurostar serves its generic automated-runner error page.
+Alerts include the travel date and price. Snap may show a departure **window**
+(for example 14:00-20:26 in the origin station's local time), which is not an
+assigned train departure or arrival. Exact times appear only when Eurostar shows
+them with the matching normal fare. If exact times are unavailable, the alert says
+so explicitly; it never estimates them from a Snap window.
 
 Controls reply immediately. Fare scans still use the GitHub schedule (every
 15 minutes requested, with possible GitHub delays). SCAN START does not dispatch
