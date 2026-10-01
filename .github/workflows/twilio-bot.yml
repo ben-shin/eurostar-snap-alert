@@ -36,6 +36,7 @@ jobs:
       - name: Install and test
         run: |
           pip install -r requirements-dev.txt
+          python -m playwright install --with-deps chromium
           python -m pytest
           node --test tests/commands.test.js
       - name: Deploy protected webhook and verify it
