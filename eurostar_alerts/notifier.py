@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Iterable
 
 from .config import NotificationConfig
 from .models import FareHit, Provider
+from .state import AlertState
 
 
 def format_hit(hit: FareHit) -> str:
@@ -51,7 +53,54 @@ def twilio_client(config: NotificationConfig):
     return Client(sid, token), from_number, to_number
 
 
-def send_whatsapp_hits(config: NotificationConfig, hits: Iterable[FareHit]) -> None:
+def restore_failed_alerts(config: NotificationConfig, hits: Iterable[FareHit], state: AlertState) -> None:
+    """Repair old dedupe entries only when Twilio proves the matching alert failed."""
+    hits = list(hits)
+    unseen_keys = {hit.dedupe_key for hit in state.unseen(hits)}
+    candidates = {format_hit(hit): hit for hit in hits if hit.dedupe_key not in unseen_keys}
+    if not candidates:
+        return
+    client, from_number, to_number = twilio_client(config)
+    latest = {}
+    delivered = set()
+    for message in client.messages.list(from_=from_number, to=to_number, limit=500):
+        if message.body not in candidates or message.date_created is None:
+            continue
+        if message.status in {"delivered", "read"}:
+            delivered.add(message.body)
+        previous = latest.get(message.body)
+        if previous is None or message.date_created > previous.date_created:
+            latest[message.body] = message
+    failed = [candidates[body] for body, message in latest.items()
+              if message.status in {"failed", "undelivered"} and body not in delivered]
+    count = state.restore_failed(failed)
+    if count:
+        print(f"Restored {count} alerts whose previous delivery Twilio confirmed had failed.")
+
+
+def send_whatsapp_hits(config: NotificationConfig, hits: Iterable[FareHit], state: AlertState) -> None:
     client, from_number, to_number = twilio_client(config)
     for hit in hits:
-        client.messages.create(body=format_hit(hit), from_=from_number, to=to_number)
+        pending = state.pending_sid(hit)
+        if pending:
+            message = client.messages(pending).fetch()
+        else:
+            message = client.messages.create(body=format_hit(hit), from_=from_number, to=to_number)
+            state.record_pending(hit, message.sid)
+        deadline = time.monotonic() + 20
+        while message.status not in {"delivered", "read", "failed", "undelivered"} and time.monotonic() < deadline:
+            time.sleep(3)
+            message = client.messages(message.sid).fetch()
+        if message.status in {"delivered", "read"}:
+            state.mark_seen([hit])
+        elif message.status in {"failed", "undelivered"}:
+            state.clear_pending(hit)
+            guidance = {
+                63015: "Rejoin the Twilio WhatsApp Sandbox.",
+                63016: "Send TEST from your phone to open the 24-hour WhatsApp reply window.",
+                21610: "The recipient opted out; rejoin or opt back in.",
+            }.get(message.error_code, "Check Twilio Messaging Logs.")
+            raise RuntimeError(f"WhatsApp delivery {message.status} (code {message.error_code}). {guidance}")
+        else:
+            # Keep the SID: a later scan checks this message instead of sending a duplicate.
+            print(f"WhatsApp delivery still {message.status}; saved pending message for next run.")

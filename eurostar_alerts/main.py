@@ -8,7 +8,7 @@ from pathlib import Path
 from .config import load_config
 from .control import ControlStore, effective_configs
 from .models import ScrapeReport
-from .notifier import send_whatsapp_hits
+from .notifier import restore_failed_alerts, send_whatsapp_hits
 from .scrapers import run_with_browser
 from .state import AlertState
 
@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
 
     hits = list({hit.dedupe_key: hit for hit in report.hits}.values())
     state = AlertState(args.state)
+    if not args.dry_run:
+        restore_failed_alerts(config.notification, hits, state)
     unseen = state.unseen(hits)
 
     print(f"Total hits: {len(hits)} | New hits: {len(unseen)}")
@@ -62,8 +64,7 @@ def main(argv: list[str] | None = None) -> int:
             if control and not any(control.still_active(search) for search in hit_searches[hit.dedupe_key]):
                 print("Suppressed fare alert: search paused, expired or modified.")
                 continue
-            send_whatsapp_hits(config.notification, [hit])
-            state.mark_seen([hit])
+            send_whatsapp_hits(config.notification, [hit], state)
     elif unseen:
         print("Dry run enabled; not sending messages or updating state.")
     elif not args.dry_run:

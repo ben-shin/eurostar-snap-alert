@@ -122,8 +122,8 @@ jobs:
             git push origin "HEAD:$GITHUB_REF_NAME"
           fi
 
-      - name: Enforce scraper health
+      - name: Enforce monitor health
         if: steps.monitor.outcome == 'failure'
         run: |
-          echo "One or more fare checks could not be classified. See the eurostar-debug artifact."
+          echo "Fare checks, phone controls or WhatsApp delivery failed. See the run logs and eurostar-debug artifact."
           exit 1

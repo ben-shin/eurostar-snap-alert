@@ -154,3 +154,9 @@ If using the Twilio Sandbox:
 
 See [Twilio Sandbox documentation](https://www.twilio.com/docs/whatsapp/sandbox)
 and [incoming webhook setup](https://www.twilio.com/docs/whatsapp/quickstart).
+
+Notification state is updated only after Twilio confirms delivered/read. Queued
+messages retain their Twilio message ID and are checked again without resending.
+Failed delivery remains eligible for retry. The scanner also repairs old dedupe
+entries when recent Twilio records prove the exact alert failed and show no
+confirmed delivery for it; unknown history is left unchanged.
