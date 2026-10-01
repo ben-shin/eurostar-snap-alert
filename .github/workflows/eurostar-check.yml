@@ -60,7 +60,10 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 12
     steps:
       - name: Check out repository
@@ -75,7 +78,7 @@ jobs:
       - name: Cache Playwright browser
         uses: actions/cache@v6
         with:
-          path: ~/.cache/ms-playwright
+          path: ~/AppData/Local/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             playwright-${{ runner.os }}-

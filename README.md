@@ -117,9 +117,12 @@ The older text commands still work. Send **COMMANDS** for their syntax:
 
 Supported cities are London, Brussels, Paris, Amsterdam, Rotterdam and Lille.
 Fare type is snap, normal or both. The maximum price applies to normal fares in
-the configured currencies; no FX conversion is performed. Normal-fare scraping
-remains optional and may fail when Eurostar serves its generic automated-runner
-error page.
+the configured currencies; no FX conversion is performed. Normal fares use the
+cheapest bookable base fare across cabins, excluding optional add-ons. The price
+is the total for the requested passengers. Normal checks use Eurostar's public
+fare query through Windows PowerShell 5.1; the scheduled fare job runs on Windows.
+Local normal checks therefore require Windows, while the test job stays on Linux.
+A failed or mismatched fare response fails the health check.
 
 Alerts include the travel date and price. Snap may show a departure **window**
 (for example 14:00-20:26 in the origin station's local time), which is not an

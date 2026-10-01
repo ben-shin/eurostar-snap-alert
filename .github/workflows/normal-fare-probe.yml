@@ -22,7 +22,7 @@ jobs:
             'x-platform' = 'web'
             'x-source-url' = 'search-app/'
           }
-          $body = Get-Content -Raw .github/normal-fare-probe.json
+          $body = Get-Content -Raw eurostar_alerts/normal_search_query.json
           $response = Invoke-WebRequest -Uri 'https://site-api.eurostar.com/gateway' -Method Post -ContentType 'application/json' -Headers $headers -Body $body -UseBasicParsing -TimeoutSec 30
           if ($response.StatusCode -ne 200) { throw "Eurostar returned HTTP $($response.StatusCode)" }
           $payload = $response.Content | ConvertFrom-Json

@@ -30,13 +30,16 @@ def format_hit(hit: FareHit, include_details: bool = True) -> str:
             if hit.departure_window:
                 lines.append(f"Departure window: {hit.departure_window} ({hit.origin} local time)")
             lines.append("Departure/arrival: assigned by Eurostar; not available at booking")
-        elif hit.departure_time and hit.arrival_time:
-            lines.append(f"Departure: {hit.departure_time} ({hit.origin} local time)")
-            lines.append(f"Arrival: {hit.arrival_time} ({hit.destination} local time)")
-            if hit.duration:
-                lines.append(f"Duration: {hit.duration}")
         else:
-            lines.append("Departure/arrival: not provided in this result")
+            if hit.fare_class:
+                lines.append(f"Class: {hit.fare_class}")
+            if hit.departure_time and hit.arrival_time:
+                lines.append(f"Departure: {hit.departure_time} ({hit.origin} local time)")
+                lines.append(f"Arrival: {hit.arrival_time} ({hit.destination} local time)")
+                if hit.duration:
+                    lines.append(f"Duration: {hit.duration}")
+            else:
+                lines.append("Departure/arrival: not provided in this result")
     lines.extend([hit.summary, f"Book/check: {hit.booking_url}"])
     return "\n".join(lines)
 

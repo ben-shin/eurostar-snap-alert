@@ -1,0 +1,108 @@
+{
+  "data": {
+    "journeySearch": {
+      "outbound": {
+        "origin": {
+          "uic": "8814001"
+        },
+        "destination": {
+          "uic": "7015400"
+        },
+        "journeys": [
+          {
+            "timing": {
+              "date": "2026-10-28",
+              "departureTime": "07:56",
+              "arrivalTime": "08:57",
+              "duration": 121
+            },
+            "fares": [
+              {
+                "classOfService": {
+                  "code": "STANDARD",
+                  "name": "Eurostar Standard"
+                },
+                "prices": {
+                  "total": 105,
+                  "displayPrice": 105
+                },
+                "seats": 31,
+                "availabilityOfClassOfService": 151
+              },
+              {
+                "classOfService": {
+                  "code": "PLUS",
+                  "name": "Eurostar Plus"
+                },
+                "prices": {
+                  "total": 130.5,
+                  "displayPrice": 130.5
+                },
+                "seats": 24,
+                "availabilityOfClassOfService": 100
+              },
+              {
+                "classOfService": {
+                  "code": "PREMIER",
+                  "name": "Eurostar Premier"
+                },
+                "prices": {
+                  "total": 299,
+                  "displayPrice": 299
+                },
+                "seats": 29,
+                "availabilityOfClassOfService": 39
+              }
+            ]
+          },
+          {
+            "timing": {
+              "date": "2026-10-28",
+              "departureTime": "08:52",
+              "arrivalTime": "09:57",
+              "duration": 125
+            },
+            "fares": [
+              {
+                "classOfService": {
+                  "code": "STANDARD",
+                  "name": "Eurostar Standard"
+                },
+                "prices": {
+                  "total": 135.5,
+                  "displayPrice": 135.5
+                },
+                "seats": 12,
+                "availabilityOfClassOfService": 36
+              },
+              {
+                "classOfService": {
+                  "code": "PLUS",
+                  "name": "Eurostar Plus"
+                },
+                "prices": {
+                  "total": 220,
+                  "displayPrice": 220
+                },
+                "seats": 8,
+                "availabilityOfClassOfService": 12
+              },
+              {
+                "classOfService": {
+                  "code": "PREMIER",
+                  "name": "Eurostar Premier"
+                },
+                "prices": {
+                  "total": 299,
+                  "displayPrice": 299
+                },
+                "seats": 7,
+                "availabilityOfClassOfService": 10
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -13,6 +13,8 @@ from playwright.sync_api import BrowserContext, Locator, Page, TimeoutError as P
 
 from .config import AppConfig
 from .models import CheckOutcome, CheckStatus, FareHit, Provider, RouteQuery, ScrapeReport
+from .normal_api import NormalApiError, parse_normal_response
+from .normal_transport import NormalTransportError, fetch_normal_response
 
 
 PRICE_RE = re.compile(
@@ -515,44 +517,56 @@ def _check_normal(page: Page, route: RouteQuery, travel_date: date, config: AppC
     if not _submit_search(page, form):
         _save_debug(page, f"normal_submit_{route.name}_{travel_date}", config.settings.debug)
         return _failed(Provider.NORMAL, route, travel_date, "search did not navigate to results")
+    if not _url_has_date(page, travel_date):
+        return _failed(Provider.NORMAL, route, travel_date, "results URL does not contain the requested date")
+    if _captcha_visible(page) or any(
+        phrase in _body_text(page).lower() for phrase in ("access denied", "unusual activity")
+    ):
+        _save_debug(page, f"normal_blocked_{route.name}_{travel_date}", config.settings.debug)
+        return _failed(Provider.NORMAL, route, travel_date, "Eurostar blocked the search")
 
-    _wait_for_result(page, Provider.NORMAL, travel_date)
-    text = _body_text(page)
-    lower = text.lower()
-    if _captcha_visible(page):
-        problem = "Eurostar displayed a CAPTCHA"
-    elif any(phrase in lower for phrase in ERROR_PHRASES):
-        problem = "Eurostar returned an error page"
-    elif not _url_has_date(page, travel_date):
-        problem = "results URL does not contain the requested date"
-    else:
-        problem = ""
-    if problem:
+    query = parse_qs(urlparse(page.url).query)
+    origin_uic = query.get("origin", [""])[0]
+    destination_uic = query.get("destination", [""])[0]
+    market = urlparse(route.booking_link).path.strip("/").split("-")[0].lower()
+    currency = "GBP" if market == "uk" else "EUR" if market in {"be", "fr", "nl", "de", "rw"} else ""
+    if currency not in config.normal_eurostar.allowed_currencies:
+        return _failed(Provider.NORMAL, route, travel_date, f"unsupported market currency for {market!r}")
+
+    try:
+        payload = fetch_normal_response(
+            origin_uic=origin_uic,
+            destination_uic=destination_uic,
+            travel_date=travel_date,
+            passengers=route.passengers,
+            currency=currency,
+            market=market,
+        )
+        fare = parse_normal_response(
+            payload,
+            origin_uic=origin_uic,
+            destination_uic=destination_uic,
+            travel_date=travel_date,
+            currency=currency,
+            passengers=route.passengers,
+        )
+    except (NormalTransportError, NormalApiError) as exc:
         _save_debug(page, f"normal_result_{route.name}_{travel_date}", config.settings.debug)
-        return _failed(Provider.NORMAL, route, travel_date, problem)
+        return _failed(Provider.NORMAL, route, travel_date, str(exc))
 
-    if any(phrase in lower for phrase in NORMAL_UNAVAILABLE_PHRASES):
+    if fare is None:
         log(f"NORMAL unavailable: {route.name} {travel_date}")
-        return CheckOutcome(Provider.NORMAL, route.name, travel_date, CheckStatus.UNAVAILABLE, "No normal fares")
-
-    allowed = set(config.normal_eurostar.allowed_currencies)
-    price = cheapest_allowed_price(_normal_price_texts(page), allowed, minimum=30)
-    if price is None:
-        _save_debug(page, f"normal_unrecognized_{route.name}_{travel_date}", config.settings.debug)
-        return _failed(Provider.NORMAL, route, travel_date, "results page contained no parseable fare")
-
-    currency, amount = price
-    if amount > config.normal_eurostar.threshold_amount:
-        log(f"NORMAL checked: {route.name} {travel_date} {currency} {amount:g}")
+        return CheckOutcome(Provider.NORMAL, route.name, travel_date, CheckStatus.UNAVAILABLE, "No bookable normal fares")
+    if fare.price_amount > config.normal_eurostar.threshold_amount:
+        log(f"NORMAL checked: {route.name} {travel_date} {fare.currency} {fare.price_amount:g}")
         return CheckOutcome(
             Provider.NORMAL,
             route.name,
             travel_date,
             CheckStatus.UNAVAILABLE,
-            f"cheapest {currency} {amount:g} exceeds threshold",
+            f"cheapest {fare.currency} {fare.price_amount:g} exceeds threshold",
         )
 
-    departure_time, arrival_time, duration = _normal_journey_details(page, price)
     hit = FareHit(
         provider=Provider.NORMAL,
         route_name=route.name,
@@ -560,16 +574,20 @@ def _check_normal(page: Page, route: RouteQuery, travel_date: date, config: AppC
         destination=route.destination,
         travel_date=travel_date,
         passengers=route.passengers,
-        price_amount=amount,
-        currency=currency,
+        price_amount=fare.price_amount,
+        currency=fare.currency,
         booking_url=page.url,
         summary=f"Normal one-way fare is at or below {config.normal_eurostar.threshold_amount:g}.",
-        departure_time=departure_time,
-        arrival_time=arrival_time,
-        duration=duration,
+        departure_time=fare.departure_time,
+        arrival_time=fare.arrival_time,
+        duration=fare.duration,
+        fare_class=fare.fare_class,
     )
-    log(f"NORMAL available: {route.name} {travel_date} {currency} {amount:g}")
-    return CheckOutcome(Provider.NORMAL, route.name, travel_date, CheckStatus.AVAILABLE, f"{currency} {amount:g}", hit)
+    log(f"NORMAL available: {route.name} {travel_date} {fare.currency} {fare.price_amount:g}")
+    return CheckOutcome(
+        Provider.NORMAL, route.name, travel_date, CheckStatus.AVAILABLE,
+        f"{fare.currency} {fare.price_amount:g}", hit,
+    )
 
 
 def _new_page(context: BrowserContext, timeout_ms: int) -> Page:

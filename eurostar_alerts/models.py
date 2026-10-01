@@ -45,6 +45,7 @@ class FareHit:
     arrival_time: Optional[str] = None
     departure_window: Optional[str] = None
     duration: Optional[str] = None
+    fare_class: Optional[str] = None
 
     @property
     def dedupe_key(self) -> str:
