@@ -1,0 +1,47 @@
+name: Probe normal fare transport
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read exact-route fares from Eurostar's public search API
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{
+            Origin = 'https://www.eurostar.com'
+            'x-market-code' = 'uk'
+            'x-platform' = 'web'
+            'x-source-url' = 'search-app/'
+          }
+          $body = Get-Content -Raw .github/normal-fare-probe.json
+          $response = Invoke-WebRequest -Uri 'https://site-api.eurostar.com/gateway' -Method Post -ContentType 'application/json' -Headers $headers -Body $body -UseBasicParsing -TimeoutSec 30
+          if ($response.StatusCode -ne 200) { throw "Eurostar returned HTTP $($response.StatusCode)" }
+          $payload = $response.Content | ConvertFrom-Json
+          if ($payload.errors) { throw 'Eurostar returned GraphQL errors' }
+          $outbound = $payload.data.journeySearch.outbound
+          if (-not $outbound -or $outbound.origin.uic -ne '8814001' -or $outbound.destination.uic -ne '7015400') {
+            throw 'Eurostar response did not match the requested route'
+          }
+          $journeys = @($outbound.journeys)
+          if ($journeys.Count -eq 0) { throw 'Eurostar returned no journeys' }
+          $prices = @()
+          foreach ($journey in $journeys) {
+            if ($journey.timing.date -ne '2026-10-28') { throw 'Eurostar returned another date' }
+            foreach ($fare in $journey.fares) {
+              if ($fare.seats -gt 0 -and $null -ne $fare.prices.displayPrice) {
+                $prices += [decimal]$fare.prices.displayPrice
+              }
+            }
+          }
+          if ($prices.Count -eq 0) { throw 'Eurostar returned no bookable fares' }
+          $minimum = ($prices | Measure-Object -Minimum).Minimum
+          Write-Output "Eurostar public search: HTTP $($response.StatusCode), journeys=$($journeys.Count), cheapest bookable GBP=$minimum"
