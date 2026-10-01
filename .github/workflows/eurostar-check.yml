@@ -1,6 +1,14 @@
 name: Eurostar fare monitor
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "eurostar_alerts/**"
+      - "twilio/**"
+      - "tests/**"
+      - "requirements*.txt"
+      - ".github/workflows/**"
   pull_request:
   workflow_dispatch:
     inputs:
@@ -21,7 +29,7 @@ concurrency:
 
 jobs:
   tests:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -38,11 +46,16 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-dev.txt
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
       - name: Run tests
-        run: python -m pytest
+        run: |
+          python -m pytest
+          node --test tests/commands.test.js
 
   check-fares:
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     runs-on: ubuntu-24.04

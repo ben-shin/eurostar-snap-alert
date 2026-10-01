@@ -5,7 +5,7 @@ import time
 import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -515,11 +515,20 @@ def _new_page(context: BrowserContext, timeout_ms: int) -> Page:
     return page
 
 
-def run_with_browser(config: AppConfig) -> ScrapeReport:
+def run_with_browser(config: AppConfig, should_continue: Optional[Callable[[], bool]] = None) -> ScrapeReport:
     outcomes: list[CheckOutcome] = []
     today = datetime.now(ZoneInfo(config.settings.timezone)).date()
     max_snap_date = today + timedelta(days=config.settings.snap_max_days_ahead)
     log(f"Starting Eurostar fare check for {today} ({config.settings.timezone})")
+    eligible = any(
+        (config.checks.get("normal_eurostar", True) and route.end_date >= today)
+        or (config.checks.get("snap", True)
+            and max(route.start_date, today + timedelta(days=1)) <= min(route.end_date, max_snap_date))
+        for route in config.routes
+    )
+    if not eligible:
+        log("No eligible travel dates; browser not started.")
+        return ScrapeReport([])
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -540,6 +549,9 @@ def run_with_browser(config: AppConfig) -> ScrapeReport:
                 for travel_date in date_range(route.start_date, route.end_date):
                     if travel_date < today:
                         continue
+                    if should_continue is not None and not should_continue():
+                        log("Search paused, expired or changed by phone; stopping this search.")
+                        break
                     # Snap's calendar starts tomorrow; today's date is disabled.
                     # Normal fares can still be checked for same-day travel.
                     if config.checks.get("snap", True) and today < travel_date <= max_snap_date:
@@ -552,6 +564,8 @@ def run_with_browser(config: AppConfig) -> ScrapeReport:
                         finally:
                             page.close()
                     if config.checks.get("normal_eurostar", True):
+                        if should_continue is not None and not should_continue():
+                            break
                         page = _new_page(context, config.settings.page_timeout_ms)
                         try:
                             outcomes.append(_check_normal(page, route, travel_date, config))

@@ -27,7 +27,7 @@ def format_hit(hit: FareHit) -> str:
     )
 
 
-def send_whatsapp_hits(config: NotificationConfig, hits: Iterable[FareHit]) -> None:
+def twilio_client(config: NotificationConfig):
     sid = os.environ.get(config.twilio_account_sid_env)
     token = os.environ.get(config.twilio_auth_token_env)
     from_number = os.environ.get(config.twilio_from_whatsapp_env)
@@ -48,6 +48,10 @@ def send_whatsapp_hits(config: NotificationConfig, hits: Iterable[FareHit]) -> N
 
     from twilio.rest import Client
 
-    client = Client(sid, token)
+    return Client(sid, token), from_number, to_number
+
+
+def send_whatsapp_hits(config: NotificationConfig, hits: Iterable[FareHit]) -> None:
+    client, from_number, to_number = twilio_client(config)
     for hit in hits:
         client.messages.create(body=format_hit(hit), from_=from_number, to=to_number)
