@@ -388,15 +388,15 @@ def _snap_price_and_window(price_elements: Locator) -> Optional[tuple[str, float
         prices = parse_prices(price_element.inner_text())
         if not prices:
             continue
-        slot_text = price_element.locator("xpath=..").inner_text()
-        window_match = re.search(
+        slot = price_element.locator("xpath=..")
+        windows = re.findall(
             r"Leaving between\s*(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})",
-            slot_text,
+            slot.inner_text(),
             flags=re.I,
         )
-        window = (
-            f"{window_match.group(1)}-{window_match.group(2)}" if window_match else None
-        )
+        # Shared containers cannot prove which window belongs to a price.
+        price_count = slot.locator('[data-testid$="-price"]').count()
+        window = f"{windows[0][0]}-{windows[0][1]}" if price_count == 1 and len(windows) == 1 else None
         for currency, amount in prices:
             if currency in {"GBP", "EUR"} and 1 <= amount <= 500:
                 candidates.append((currency, amount, window))

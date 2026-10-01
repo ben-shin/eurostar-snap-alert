@@ -55,6 +55,19 @@ def test_live_snap_markup_keeps_winning_price_with_its_window_and_excludes_adjac
     assert _snap_price_and_window(prices) == ("GBP", 45.0, "14:00-20:26")
 
 
+def test_shared_parent_does_not_pair_cheapest_price_with_first_window(page):
+    page.set_content("""
+      <div data-testid="shared-snap-options">
+        <span>Leaving between 07:00 - 12:00</span>
+        <span data-testid="2026-10-03-outbound-07:00-price">£55</span>
+        <span>Leaving between 14:00 - 20:00</span>
+        <span data-testid="2026-10-03-outbound-14:00-price">£45</span>
+      </div>
+    """)
+    prices = page.locator('[data-testid^="2026-10-03-outbound-"][data-testid$="-price"]')
+    assert _snap_price_and_window(prices) == ("GBP", 45.0, None)
+
+
 def test_snap_missing_window_is_not_invented(page):
     page.set_content('<div data-testid="2026-10-03-outbound-14:00-price">£45</div>')
     prices = page.locator('[data-testid^="2026-10-03-outbound-"][data-testid$="-price"]')
