@@ -17,6 +17,11 @@ on:
         required: true
         default: true
         type: boolean
+      snapshot_only:
+        description: Publish fresh phone results without messages or alert-state changes
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: "*/15 * * * *"
 
@@ -98,9 +103,12 @@ jobs:
           TWILIO_FROM_WHATSAPP: ${{ secrets.TWILIO_FROM_WHATSAPP }}
           TWILIO_TO_WHATSAPP: ${{ secrets.TWILIO_TO_WHATSAPP }}
           MANUAL_DRY_RUN: ${{ inputs.dry_run || false }}
+          MANUAL_SNAPSHOT_ONLY: ${{ inputs.snapshot_only || false }}
         run: |
           args=()
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$MANUAL_DRY_RUN" == "true" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$MANUAL_SNAPSHOT_ONLY" == "true" ]]; then
+            args+=(--snapshot-only)
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$MANUAL_DRY_RUN" == "true" ]]; then
             args+=(--dry-run)
           fi
           python -m eurostar_alerts.main --config config.yml "${args[@]}"

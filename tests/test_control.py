@@ -69,6 +69,7 @@ def test_paused_monitor_does_not_scan_or_notify(monkeypatch, tmp_path):
     store = MagicMock()
     store.read.return_value = data
     store.claim_request.return_value = None
+    store.delivery_state.return_value = None
     monkeypatch.setattr(main, "ControlStore", lambda *args: store)
     scan = MagicMock()
     send = MagicMock()
@@ -109,6 +110,7 @@ def test_changed_search_suppresses_alert_and_dedupe_update(monkeypatch, tmp_path
     store = MagicMock()
     store.read.return_value = data
     store.claim_request.return_value = None
+    store.delivery_state.return_value = None
     store.still_active.return_value = False
     monkeypatch.setattr(main, "ControlStore", lambda *args: store)
     monkeypatch.setattr(main, "effective_configs", lambda *args, **kwargs: [(data["searches"][0], config)])

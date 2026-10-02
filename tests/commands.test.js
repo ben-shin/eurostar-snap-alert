@@ -260,13 +260,13 @@ test("changed, paused and expired searches cannot masquerade as current hits", (
   let state = sampleReport(add(), 1);
   state.searches[0].max = 20;
   assert.match(applyInput(state, "RESULTS", owner, now).reply, /no longer fit current searches/);
-  assert.match(applyInput(state, "RESULTS", owner, now).reply, /No current matches/);
+  assert.match(applyInput(state, "RESULTS", owner, now).reply, /coverage is incomplete/);
   state = sampleReport(add(), 1);
   state.enabled = false;
   assert.match(applyInput(state, "RESULTS", owner, now).reply, /Cached results while automatic alerts are paused/);
   state.searches[0].end_date = "2026-09-30";
   assert.match(applyInput(state, "RESULTS", owner, now).reply, /expired/);
-  assert.match(applyInput(state, "RESULTS", owner, now).reply, /No current matches/);
+  assert.match(applyInput(state, "RESULTS", owner, now).reply, /coverage is incomplete/);
 });
 test("partial results and storage omissions are disclosed rather than called clear", () => {
   const state = sampleReport(add(), 0);
@@ -278,7 +278,7 @@ test("partial results and storage omissions are disclosed rather than called cle
   state.check_report.omitted_hits = 4;
   const reply = applyInput(state, "RESULTS", owner, now).reply;
   assert.match(reply, /Partial: 1\/2 checks completed; 1 failed/);
-  assert.match(reply, /No confirmed matches in completed checks/);
+  assert.match(reply, /No confirmed matches shown here/);
   assert.match(reply, /4 more match\(es\) omitted/);
 });
 test("webhook queues one request, acknowledges schedule, and deduplicates retries", async () => {
@@ -307,4 +307,61 @@ test("webhook queues one request, acknowledges schedule, and deduplicates retrie
   assert.equal(writes, 1);
   assert.equal((await invoke(event)).messages.length, 0);
   assert.equal(writes, 1);
+});
+
+test("zero-hit report becomes inapplicable after editing the fare limit", () => {
+  const state = sampleReport(add(), 0);
+  state.check_report.attempted = 1;
+  state.check_report.completed = 1;
+  state.searches[0].max = 200;
+  const reply = applyInput(state, "RESULTS", owner, now).reply;
+  assert.match(reply, /Search s1 changed since report/);
+  assert.match(reply, /current settings were not checked/);
+  assert.match(reply, /coverage is incomplete/);
+  assert.doesNotMatch(reply, /No current matches in this report/);
+});
+test("zero-hit report identifies a search added after the snapshot", () => {
+  const state = sampleReport(add(), 0);
+  state.check_report.attempted = 1;
+  state.check_report.completed = 1;
+  const updated = add(state);
+  const reply = applyInput(updated, "RESULTS", owner, now).reply;
+  assert.match(reply, /Search s2 added since report; not yet checked/);
+  assert.match(reply, /coverage is incomplete/);
+  assert.doesNotMatch(reply, /No current matches in this report/);
+});
+test("mixed success lists failed route and date without exposing backend error text", () => {
+  const state = sampleReport(add(), 1);
+  state.check_report.state = "partial";
+  state.check_report.attempted = 4;
+  state.check_report.completed = 1;
+  state.check_report.failed = 3;
+  state.check_report.omitted_errors = 2;
+  state.check_report.errors = [
+    {search_id:"s1",provider:"normal_eurostar",date:"2026-10-06",message:"secret token abc"},
+    {search_id:"s1",provider:"snap",date:"2026-10-07",message:"private debug stack"},
+    {search_id:"s1",provider:"snap",date:"2026-10-08",message:"internal URL"},
+  ];
+  let result = applyInput(state, "RESULTS", owner, now);
+  assert.match(result.reply, /2026-10-06: check failed/);
+  assert.match(result.reply, /2026-10-07: check failed/);
+  assert.match(result.reply, /2 more failed check\(s\) omitted/);
+  assert.doesNotMatch(result.reply, /secret token|private debug|internal URL/);
+  assert.match(result.reply, /Reply MORE/);
+  assert.ok(result.reply.length <= 1500);
+  result = applyInput(result.data, "MORE", owner, now);
+  assert.match(result.reply, /2026-10-08: check failed/);
+  assert.doesNotMatch(result.reply, /secret token|private debug|internal URL/);
+});
+test("report delivery pending cannot be overwritten or cancelled", () => {
+  for (const status of ["report_ready", "delivery_pending"]) {
+    const state = add();
+    state.check_request = {id:sid("b"),requested_at:now.toISOString(),status};
+    const queued = applyInput(state, "CHECK NOW", owner, now, sid("c"));
+    assert.match(queued.reply, /awaiting delivery/);
+    assert.equal(queued.data.check_request.id, sid("b"));
+    assert.equal(queued.checkQueued, undefined);
+    assert.equal(applyInput(state, "CANCEL", owner, now).data.check_request.status, status);
+    assert.equal(applyInput(state, "SCAN STOP", owner, now).data.check_request.status, status);
+  }
 });

@@ -9,10 +9,37 @@ from pathlib import Path
 from .config import load_config
 from .control import ControlStore, effective_configs
 from .models import CheckOutcome, CheckStatus, Provider, ScrapeReport
-from .notifier import restore_failed_alerts, send_whatsapp_hits, send_check_report
+from .notifier import (
+    check_report_delivery_status, restore_failed_alerts, send_check_report, send_whatsapp_hits,
+)
 from .scrapers import run_with_browser
 from .state import AlertState
 from .status_report import make_check_report
+
+
+def _advance_check_delivery(control: ControlStore, notification) -> None:
+    pending = control.delivery_state()
+    if pending is None:
+        return
+    request, _ = pending
+    request_id = request["id"]
+    report = control.revalidate_delivery_report(request_id)
+    if report is None:
+        return
+    if request["status"] == "report_ready":
+        # A definite create failure leaves report_ready intact for the next run.
+        message = send_check_report(notification, report)
+        if not control.update_delivery(request_id, "report_ready", "delivery_pending",
+                                       pending_sid=message.sid):
+            return
+        status = message.status
+    else:
+        # Never create another message while the saved SID is still pending.
+        status = check_report_delivery_status(notification, request["pending_sid"])
+    if status in {"delivered", "read"}:
+        control.update_delivery(request_id, "delivery_pending", "delivered")
+    elif status in {"failed", "undelivered"}:
+        control.update_delivery(request_id, "delivery_pending", "report_ready")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,29 +48,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state", default="data/notified.json", help="Path to duplicate-alert state file")
     parser.add_argument("--report", default="debug/report.json", help="Path to the machine-readable health report")
     parser.add_argument("--dry-run", action="store_true", help="Print matches without sending WhatsApp alerts")
+    parser.add_argument("--snapshot-only", action="store_true",
+                        help="Publish current results without WhatsApp messages or alert-state changes")
     parser.add_argument("--controls", default="data/twilio-control.json", help="Twilio control connection metadata")
     parser.add_argument("--local-config", action="store_true", help="Use YAML only (requires --dry-run)")
     args = parser.parse_args(argv)
     if args.local_config and not args.dry_run:
         parser.error("--local-config requires --dry-run")
+    if args.snapshot_only and (args.dry_run or args.local_config):
+        parser.error("--snapshot-only cannot be combined with --dry-run or --local-config")
+    if args.snapshot_only and not Path(args.controls).exists():
+        parser.error("--snapshot-only requires connected phone controls")
 
     config = load_config(args.config)
     control = None
     request_id = None
     hit_searches = {}
     started_at = datetime.now(timezone.utc).isoformat()
-    completion_snapshot = None
     if Path(args.controls).exists() and not args.local_config:
         control = ControlStore(config, args.controls)
-        if not args.dry_run:
+        if not args.dry_run and not args.snapshot_only:
             request_id = control.claim_request()
         controls = control.read()
-        searches = effective_configs(config, controls, allow_global_pause=bool(request_id))
+        searches = effective_configs(config, controls, allow_global_pause=bool(request_id) or args.snapshot_only)
         outcomes = []
         runs = []
+        interrupted_ids = set()
         for search, search_config in searches:
             if request_id:
                 should_continue = lambda search=search: control.still_active(search, request_id)
+            elif args.snapshot_only:
+                should_continue = lambda search=search: control.still_active(
+                    search, allow_global_pause=True
+                )
             else:
                 should_continue = lambda search=search: control.still_active(search)
             try:
@@ -61,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
                         (Provider.NORMAL, search_config.checks["normal_eurostar"]),
                     ) if enabled
                 ])
+            if not should_continue():
+                interrupted_ids.add(search["id"])
             runs.append((search, search_report))
             outcomes.extend(search_report.outcomes)
             for hit in search_report.hits:
@@ -72,22 +111,24 @@ def main(argv: list[str] | None = None) -> int:
         # one-off request with no eligible searches gets an explicit paused report.
         if not args.dry_run and (searches or request_id):
             snapshot = make_check_report(
-                controls, runs, request_id=request_id, started_at=started_at
+                controls, runs, request_id=request_id, started_at=started_at,
+                interrupted_ids=interrupted_ids, manual_snapshot=args.snapshot_only,
             )
-            published_requested = control.publish_report(snapshot, request_id)
-            if request_id and published_requested:
-                completion_snapshot = snapshot
+            control.publish_report(snapshot, request_id)
     else:
         report = run_with_browser(config)
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report.as_dict(), indent=2) + "\n", encoding="utf-8")
-    if completion_snapshot is not None:
-        send_check_report(config.notification, completion_snapshot)
+    if control and not args.dry_run and not args.snapshot_only:
+        _advance_check_delivery(control, config.notification)
 
     hits = list({hit.dedupe_key: hit for hit in report.hits}.values())
     if request_id:
         print("One-off check completed; alert dedupe state left unchanged.")
+        return 1 if report.failures else 0
+    if args.snapshot_only:
+        print("Results snapshot published; no WhatsApp messages or alert-state changes.")
         return 1 if report.failures else 0
 
     state = AlertState(args.state)

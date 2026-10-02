@@ -130,9 +130,14 @@ def send_whatsapp_hits(config: NotificationConfig, hits: Iterable[FareHit], stat
 
 
 
-def send_check_report(config: NotificationConfig, report: dict) -> None:
-    """Send a completion report for an explicitly requested fresh scan."""
+def send_check_report(config: NotificationConfig, report: dict):
+    """Create the request-keyed completion message; caller persists its SID."""
     from .status_report import format_check_report
 
     client, from_number, to_number = twilio_client(config)
-    client.messages.create(body=format_check_report(report), from_=from_number, to=to_number)
+    return client.messages.create(body=format_check_report(report), from_=from_number, to=to_number)
+
+
+def check_report_delivery_status(config: NotificationConfig, sid: str) -> str:
+    client, _, _ = twilio_client(config)
+    return client.messages(sid).fetch().status

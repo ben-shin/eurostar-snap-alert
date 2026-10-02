@@ -265,6 +265,8 @@ function formatReport(data, now = new Date(), page = 1) {
   const pending = data.check_request;
   if (pending && ["queued", "running"].includes(pending.status))
     lines.push("One-off check " + pending.status + " since " + reportTime(pending.requested_at, data.timezone, now) + ".");
+  else if (pending && ["report_ready", "delivery_pending"].includes(pending.status))
+    lines.push("Your requested report is ready; delivery is being checked.");
   if (!report) return lines.join("\n") +
     "\nNo completed check report yet. Send CHECK NOW to request one.";
   lines.push("Checked " + reportTime(report.completed_at, data.timezone, now) + ".");
@@ -273,8 +275,33 @@ function formatReport(data, now = new Date(), page = 1) {
     " checks completed; " + (report.failed || 0) + " failed.");
   if (!data.enabled) lines.push("Cached results while automatic alerts are paused.");
   const historical = new Map((report.searches || []).map((search) => [search.id, search]));
+  const current = new Map(data.searches.map((search) => [search.id, search]));
+  const coverage = [];
+  for (const search of data.searches) {
+    const old = historical.get(search.id);
+    if (!old) coverage.push("Search " + search.id + " added since report; not yet checked.");
+    else if (search.end_date < today && old.status !== "expired")
+      coverage.push("Search " + search.id + " is now expired; old results do not apply.");
+    else if (!search.enabled && old.settings?.enabled)
+      coverage.push("Search " + search.id + " is now paused; old results do not apply.");
+    else if (!sameSettings(search, old.settings))
+      coverage.push("Search " + search.id + " changed since report; current settings were not checked.");
+  }
+  for (const old of report.searches || [])
+    if (!current.has(old.id)) coverage.push("Search " + old.id + " was removed since report.");
+  if (report.coverage_changed) {
+    lines.push("Coverage changed during the check; results may be incomplete.");
+    for (const note of (report.coverage_notes || []).slice(0, 2))
+      if (typeof note === "string") coverage.push(note.replace(/[\r\n\x00-\x1f]/g, " ").slice(0, 100));
+  }
+  if (coverage.length) {
+    lines.push("This report does not cover all current searches:");
+    lines.push(...coverage.slice(0, 3));
+    if (coverage.length > 3) lines.push((coverage.length - 3) + " more change(s).");
+    lines.push("Send CHECK NOW for current settings.");
+  } else if (paused || expired) lines.push("Paused and expired searches were not checked.");
   const matches = (report.hits || []).filter((hit) => {
-    const search = data.searches.find((item) => item.id === hit.search_id);
+    const search = current.get(hit.search_id);
     const record = historical.get(hit.search_id);
     return search && search.enabled && search.end_date >= today && hit.date >= today &&
       sameSettings(search, record?.settings);
@@ -282,20 +309,35 @@ function formatReport(data, now = new Date(), page = 1) {
   const omitted = Math.max(0, Number(report.omitted_hits) || 0);
   const mismatch = Math.max(0, (Number(report.hit_count) || 0) - omitted - matches.length);
   if (mismatch) lines.push(mismatch + " saved match(es) no longer fit current searches/dates; request a new check.");
-  if (!matches.length) lines.push(report.failed ?
-    "No confirmed matches in completed checks; failed checks leave this report incomplete." :
+  if (!matches.length) lines.push(report.failed || coverage.length || report.coverage_changed || mismatch || omitted ?
+    "No confirmed matches shown here; coverage is incomplete, so a fresh check is needed." :
     "No current matches in this report.");
-  const pages = Math.max(1, Math.ceil(matches.length / REPORT_PAGE_SIZE));
+  const errors = (report.errors || []).filter((error) =>
+    error && typeof error === "object" && typeof error.date === "string");
+  const omittedErrors = Math.max(0, Number(report.omitted_errors) || 0);
+  const hitPageSize = report.failed || coverage.length || report.coverage_changed ? 1 : REPORT_PAGE_SIZE;
+  const errorPageSize = 2;
+  const pages = Math.max(1, Math.ceil(matches.length / hitPageSize), Math.ceil(errors.length / errorPageSize));
   const selected = Math.max(1, Math.min(page, pages));
-  if (matches.length) {
-    lines.push("Showing " + ((selected - 1) * REPORT_PAGE_SIZE + 1) + "-" +
-      Math.min(selected * REPORT_PAGE_SIZE, matches.length) + " of " + matches.length +
-      " saved matches:");
-    for (const hit of matches.slice((selected - 1) * REPORT_PAGE_SIZE, selected * REPORT_PAGE_SIZE))
-      lines.push(reportHit(hit));
-    if (selected < pages) lines.push("Reply MORE for the next page.");
+  const shownHits = matches.slice((selected - 1) * hitPageSize, selected * hitPageSize);
+  if (shownHits.length) {
+    lines.push("Showing " + ((selected - 1) * hitPageSize + 1) + "-" +
+      Math.min(selected * hitPageSize, matches.length) + " of " + matches.length + " saved matches:");
+    for (const hit of shownHits) lines.push(reportHit(hit));
   }
+  const shownErrors = errors.slice((selected - 1) * errorPageSize, selected * errorPageSize);
+  if (shownErrors.length) {
+    lines.push("Failed checks:");
+    for (const error of shownErrors) {
+      const search = current.get(error.search_id) || historical.get(error.search_id)?.settings;
+      const route = search ? search.origin + " -> " + search.destination : "Search " + error.search_id;
+      lines.push(route + " | " + (error.provider === "snap" ? "Snap" : "Normal") +
+        " | " + error.date + ": check failed.");
+    }
+  }
+  if (selected < pages) lines.push("Reply MORE for the next page.");
   if (omitted) lines.push(omitted + " more match(es) omitted from the bounded stored report.");
+  if (omittedErrors) lines.push(omittedErrors + " more failed check(s) omitted from the bounded stored report.");
   return lines.join("\n");
 }
 function rememberReport(result, owner, now, page = 1) {
@@ -310,8 +352,10 @@ function requestedCheck(data, owner, now, messageSid) {
   const previous = data.check_request;
   if (!active.length) return saved(data, owner, null,
     "No enabled, unexpired searches to check. Your settings are unchanged.");
-  if (previous && ["queued", "running"].includes(previous.status))
-    return saved(data, owner, null, "A one-off check is already " + previous.status +
+  if (previous && ["queued", "running", "report_ready", "delivery_pending"].includes(previous.status))
+    return saved(data, owner, null, ["report_ready", "delivery_pending"].includes(previous.status) ?
+      "Your last check has finished and its report is awaiting delivery. No second scan was queued." :
+      "A one-off check is already " + previous.status +
       " since " + reportTime(previous.requested_at, data.timezone, now) + ". No second scan was queued.");
   if (!/^SM[a-f0-9]{32}$/i.test(messageSid || ""))
     throw Error("Could not identify this check request. Please retry.");
