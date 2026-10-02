@@ -42,7 +42,7 @@ def test_changed_or_paused_search_cannot_send_stale_fares(monkeypatch):
     store.config = config
     store.read = lambda: data
     monkeypatch.setattr("eurostar_alerts.control.effective_configs",
-                        lambda config, data: [(s, config) for s in data["searches"]] if data["enabled"] else [])
+                        lambda config, data, **kwargs: [(s, config) for s in data["searches"]] if data["enabled"] else [])
     assert store.still_active(original)
     data["searches"][0]["passengers"] = 2
     assert not store.still_active(original)
@@ -68,6 +68,7 @@ def test_paused_monitor_does_not_scan_or_notify(monkeypatch, tmp_path):
     metadata.write_text("{}")
     store = MagicMock()
     store.read.return_value = data
+    store.claim_request.return_value = None
     monkeypatch.setattr(main, "ControlStore", lambda *args: store)
     scan = MagicMock()
     send = MagicMock()
@@ -107,9 +108,10 @@ def test_changed_search_suppresses_alert_and_dedupe_update(monkeypatch, tmp_path
     metadata.write_text("{}")
     store = MagicMock()
     store.read.return_value = data
+    store.claim_request.return_value = None
     store.still_active.return_value = False
     monkeypatch.setattr(main, "ControlStore", lambda *args: store)
-    monkeypatch.setattr(main, "effective_configs", lambda *args: [(data["searches"][0], config)])
+    monkeypatch.setattr(main, "effective_configs", lambda *args, **kwargs: [(data["searches"][0], config)])
     hit = FareHit(Provider.SNAP, "test route", "Brussels Midi", "London St Pancras",
                   date(2026, 10, 2), 1, 45, "GBP", "https://snap.eurostar.com/", "test")
     report = ScrapeReport([CheckOutcome(Provider.SNAP, "test route", hit.travel_date, CheckStatus.AVAILABLE, "test", hit)])

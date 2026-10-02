@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -31,10 +32,10 @@ def seed_controls(config: AppConfig) -> dict:
     }
 
 
-def effective_configs(config: AppConfig, data: dict, today=None) -> list[tuple[dict, AppConfig]]:
+def effective_configs(config: AppConfig, data: dict, today=None, *, allow_global_pause=False) -> list[tuple[dict, AppConfig]]:
     if data.get("version") != 1 or not isinstance(data.get("searches"), list):
         raise ValueError("Invalid phone control document")
-    if not data["enabled"]:
+    if not data["enabled"] and not allow_global_pause:
         return []
     today = today or datetime.now(ZoneInfo(data["timezone"])).date()
     result = []
@@ -72,7 +73,75 @@ class ControlStore:
     def read(self) -> dict:
         return self.document.fetch().data
 
-    def still_active(self, original: dict) -> bool:
+    def claim_request(self) -> str | None:
+        """Claim one queued phone request without overwriting concurrent edits."""
+        for _ in range(3):
+            current = self.document.fetch()
+            request = current.data.get("check_request") or {}
+            if request.get("status") == "running":
+                try:
+                    started = datetime.fromisoformat(request["started_at"])
+                    stale = started.tzinfo is not None and datetime.now(timezone.utc) - started > timedelta(minutes=20)
+                except (KeyError, TypeError, ValueError):
+                    stale = True
+                if not stale:
+                    return None
+            elif request.get("status") != "queued":
+                return None
+            updated = deepcopy(current.data)
+            updated["check_request"] = {
+                **request, "status": "running", "started_at": datetime.now(timezone.utc).isoformat()
+            }
+            try:
+                self.document.update(data=updated, if_match=current.revision)
+                return request["id"]
+            except Exception as exc:
+                if getattr(exc, "status", None) != 412:
+                    raise
+        raise RuntimeError("Could not claim check request after concurrent control updates")
+
+    def publish_report(self, report: dict, request_id: str | None = None) -> bool:
+        """Publish a bounded snapshot, completing only this run's request."""
+        for _ in range(3):
+            current = self.document.fetch()
+            request = current.data.get("check_request") or {}
+            if request_id and (request.get("id") != request_id or request.get("status") != "running"):
+                return False
+            updated = deepcopy(current.data)
+            updated["check_report"] = deepcopy(report)
+            if request_id:
+                updated["check_request"] = {**request, "status": "completed"}
+            snapshot = updated["check_report"]
+            while len(json.dumps(updated, ensure_ascii=False).encode("utf-8")) > 14_000:
+                if snapshot["hits"]:
+                    snapshot["hits"].pop()
+                    snapshot["omitted_hits"] += 1
+                elif snapshot["errors"]:
+                    snapshot["errors"].pop()
+                    snapshot["omitted_errors"] += 1
+                else:
+                    raise RuntimeError("Phone controls and scan report exceed Sync storage limit")
+            try:
+                self.document.update(data=updated, if_match=current.revision)
+                report.clear()
+                report.update(snapshot)
+                return bool(request_id)
+            except Exception as exc:
+                if getattr(exc, "status", None) != 412:
+                    raise
+        raise RuntimeError("Could not publish scan report after concurrent control updates")
+
+    def still_active(self, original: dict, request_id: str | None = None) -> bool:
         # Read before each date check and each notification so STOP/edits take effect
         # during a running job. A request already in flight cannot be recalled.
-        return any(search == original for search, _ in effective_configs(self.config, self.read()))
+        data = self.read()
+        if request_id and not (
+            (data.get("check_request") or {}).get("id") == request_id
+            and (data.get("check_request") or {}).get("status") == "running"
+        ):
+            return False
+        return any(
+            search == original for search, _ in effective_configs(
+                self.config, data, allow_global_pause=bool(request_id)
+            )
+        )

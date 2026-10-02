@@ -103,12 +103,33 @@ conversation, or **MENU** to start over. An unfinished conversation expires afte
 30 minutes; saved searches are unaffected. Bare **STOP** disconnects the WhatsApp
 Sandbox, so use menu choice 3 or **SCAN STOP** to pause alerts.
 
+Use menu choice **6 Check now** or send **CHECK NOW** to queue one fresh check.
+The bot immediately acknowledges the request and shows the latest saved report;
+it sends a completion report after the scanner finishes. A queued request is
+picked up by the next GitHub scheduled run, normally within about 15 minutes
+plus scan time, though GitHub can delay schedules. A one-off check includes
+individually enabled, unexpired searches even when automatic alerts are paused,
+without resuming automatic alerts or changing alert history. **CANCEL** or
+**SCAN STOP** cancels a queued request and stops later date checks in a running
+one; an in-flight request can finish.
+
+Use menu choice **7 Latest results** or send **RESULTS** to read the latest
+completed scan, then **MORE** for additional saved matches. It shows the check
+time, completed and failed counts, matching journey details, and any omitted
+matches when storage is full. A zero-hit report is distinct from failed checks.
+Results from changed, paused, expired or past-date searches are marked stale
+rather than counted as current. When automatic monitoring is paused, the last
+completed report stays available as cached results. These are fare observations
+from the displayed check time, so verify price and availability before booking.
+
 The older text commands still work. Send **COMMANDS** for their syntax:
 
 | Message | Effect |
 | --- | --- |
 | TEST | Immediate webhook check |
-| STATUS or SEARCH LIST | Show search settings and status |
+| STATUS or SEARCH LIST | Show search settings and latest check status |
+| CHECK NOW | Queue one fresh check and show the latest saved report |
+| RESULTS / MORE | Read the latest saved results in pages |
 | SCAN STOP / SCAN START | Pause or resume all alerts |
 | SEARCH STOP s1 / SEARCH START s1 | Pause or resume one search |
 | SEARCH DELETE s1 | Delete one search |
@@ -130,7 +151,7 @@ assigned train departure or arrival. Exact times appear only when Eurostar shows
 them with the matching normal fare. If exact times are unavailable, the alert says
 so explicitly; it never estimates them from a Snap window.
 
-Controls reply immediately. Fare scans still use the GitHub schedule (every
+Controls reply immediately. Fare scans use the GitHub schedule (every
 15 minutes requested, with possible GitHub delays). SCAN START does not dispatch
 an immediate scan. The scanner rereads settings before each date check and each
 alert, so a stop or edit interrupts an ongoing search after its in-flight request.

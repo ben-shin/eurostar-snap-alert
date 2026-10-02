@@ -99,6 +99,7 @@ function applyCommand(original, body, now = new Date()) {
   }
   if (command === "SCAN" && words.length === 1 && ["START", "STOP"].includes(words[0].toUpperCase())) {
     data.enabled = words[0].toUpperCase() === "START";
+    if (!data.enabled) cancelCheck(data);
     return { data, changed: true, reply: data.enabled ?
       "Scanning enabled. Active, unexpired searches resume on the next scheduled run." :
       "Scanning and fare alerts paused. An in-flight page or message may finish. Send SCAN START to resume." };
@@ -129,7 +130,7 @@ function applyCommand(original, body, now = new Date()) {
 }
 
 
-const MENU = "Hi! I can watch Eurostar fares for you.\n1 Add a search\n2 My searches\n3 Pause all alerts\n4 Resume all alerts\n5 Help\nReply with a number, or send MENU anytime.";
+const MENU = "Hi! I can watch Eurostar fares for you.\n1 Add a search\n2 My searches\n3 Pause all alerts\n4 Resume all alerts\n5 Help\n6 Check now\n7 Latest results\nReply with a number, or send MENU anytime.";
 const CITY_KEYS = Object.keys(STATIONS), FIELDS = ["from","to","start","end","passengers","mode","max"];
 const SESSION_MS = 30 * 60 * 1000;
 function choose(text, options) {
@@ -208,18 +209,161 @@ function saved(data, owner, session, reply) {
   data.conversations = session ? {[owner]:session} : {};
   return {data,changed:true,reply};
 }
-function applyInput(original, body, owner, now = new Date()) {
+
+const REPORT_PAGE_SIZE = 2;
+function activeSearches(data, today) {
+  return data.searches.filter((search) => search.enabled && search.end_date >= today);
+}
+function cancelCheck(data) {
+  if (data.check_request && ["queued", "running"].includes(data.check_request.status)) {
+    delete data.check_request;
+    return true;
+  }
+  return false;
+}
+function sameSettings(current, saved) {
+  const fields = ["origin", "destination", "start_date", "end_date", "passengers", "mode", "max", "enabled"];
+  return current && saved && fields.every((field) =>
+    field === "max" || field === "passengers" ?
+      Number(current[field]) === Number(saved[field]) : current[field] === saved[field]);
+}
+function reportTime(value, timezone, now) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "unknown time";
+  const local = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone, dateStyle: "medium", timeStyle: "short",
+  }).format(date);
+  const minutes = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 60000));
+  return local + " " + timezone + " (" + (minutes < 1 ? "just now" : minutes + " min ago") + ")";
+}
+function reportHit(hit) {
+  const short = (value, limit) => {
+    const text = String(value || "");
+    return text.length <= limit ? text : text.slice(0, limit - 1) + "…";
+  };
+  const price = hit.price == null ? "fare available" :
+    (hit.currency === "GBP" ? "£" : hit.currency === "EUR" ? "€" : (hit.currency || "") + " ") + Number(hit.price);
+  const lines = [(hit.provider === "snap" ? "Snap" : "Normal") + " " + short(hit.route, 80) + " | " + hit.date + " | " + price];
+  if (hit.fare_class) lines.push(short(hit.fare_class, 40));
+  if (hit.departure_window) lines.push("Departure window " + short(hit.departure_window, 32) + " (origin local); exact train assigned later");
+  else if (hit.departure_time && hit.arrival_time)
+    lines.push("Dep " + short(hit.departure_time, 10) + " / Arr " + short(hit.arrival_time, 10) + " (station local)" +
+      (hit.duration ? " | " + short(hit.duration, 16) : ""));
+  else lines.push("Departure/arrival not available");
+  if (typeof hit.booking_url === "string" && /^https:\/\//.test(hit.booking_url))
+    lines.push(hit.booking_url.length <= 240 ? hit.booking_url : "Booking link omitted (too long); check Eurostar directly.");
+  return lines.join("\n");
+}
+function formatReport(data, now = new Date(), page = 1) {
+  const report = data.check_report, today = todayIn(data.timezone, now);
+  const active = activeSearches(data, today).length;
+  const paused = data.searches.filter((search) => !search.enabled && search.end_date >= today).length;
+  const expired = data.searches.filter((search) => search.end_date < today).length;
+  const lines = ["Latest fare results"];
+  lines.push("Automatic alerts " + (data.enabled ? "ON" : "PAUSED") +
+    "; searches: " + active + " active, " + paused + " paused, " + expired + " expired.");
+  const pending = data.check_request;
+  if (pending && ["queued", "running"].includes(pending.status))
+    lines.push("One-off check " + pending.status + " since " + reportTime(pending.requested_at, data.timezone, now) + ".");
+  if (!report) return lines.join("\n") +
+    "\nNo completed check report yet. Send CHECK NOW to request one.";
+  lines.push("Checked " + reportTime(report.completed_at, data.timezone, now) + ".");
+  const state = {complete:"Complete", partial:"Partial", failed:"Failed", paused:"Paused"}[report.state] || "Unknown";
+  lines.push(state + ": " + (report.completed || 0) + "/" + (report.attempted || 0) +
+    " checks completed; " + (report.failed || 0) + " failed.");
+  if (!data.enabled) lines.push("Cached results while automatic alerts are paused.");
+  const historical = new Map((report.searches || []).map((search) => [search.id, search]));
+  const matches = (report.hits || []).filter((hit) => {
+    const search = data.searches.find((item) => item.id === hit.search_id);
+    const record = historical.get(hit.search_id);
+    return search && search.enabled && search.end_date >= today && hit.date >= today &&
+      sameSettings(search, record?.settings);
+  }).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const omitted = Math.max(0, Number(report.omitted_hits) || 0);
+  const mismatch = Math.max(0, (Number(report.hit_count) || 0) - omitted - matches.length);
+  if (mismatch) lines.push(mismatch + " saved match(es) no longer fit current searches/dates; request a new check.");
+  if (!matches.length) lines.push(report.failed ?
+    "No confirmed matches in completed checks; failed checks leave this report incomplete." :
+    "No current matches in this report.");
+  const pages = Math.max(1, Math.ceil(matches.length / REPORT_PAGE_SIZE));
+  const selected = Math.max(1, Math.min(page, pages));
+  if (matches.length) {
+    lines.push("Showing " + ((selected - 1) * REPORT_PAGE_SIZE + 1) + "-" +
+      Math.min(selected * REPORT_PAGE_SIZE, matches.length) + " of " + matches.length +
+      " saved matches:");
+    for (const hit of matches.slice((selected - 1) * REPORT_PAGE_SIZE, selected * REPORT_PAGE_SIZE))
+      lines.push(reportHit(hit));
+    if (selected < pages) lines.push("Reply MORE for the next page.");
+  }
+  if (omitted) lines.push(omitted + " more match(es) omitted from the bounded stored report.");
+  return lines.join("\n");
+}
+function rememberReport(result, owner, now, page = 1) {
+  result.data.conversations = {[owner]: {stage:"results", page,
+    report_completed_at:result.data.check_report?.completed_at || null,
+    expires_at:now.getTime() + SESSION_MS}};
+  return result;
+}
+function requestedCheck(data, owner, now, messageSid) {
+  const today = todayIn(data.timezone, now);
+  const active = activeSearches(data, today);
+  const previous = data.check_request;
+  if (!active.length) return saved(data, owner, null,
+    "No enabled, unexpired searches to check. Your settings are unchanged.");
+  if (previous && ["queued", "running"].includes(previous.status))
+    return saved(data, owner, null, "A one-off check is already " + previous.status +
+      " since " + reportTime(previous.requested_at, data.timezone, now) + ". No second scan was queued.");
+  if (!/^SM[a-f0-9]{32}$/i.test(messageSid || ""))
+    throw Error("Could not identify this check request. Please retry.");
+  data.check_request = {id: messageSid, requested_at: now.toISOString(), status: "queued"};
+  const result = saved(data, owner, null,
+    "Queued a one-off check of " + active.length + " active search(es). " +
+    (data.enabled ? "" : "Automatic alerts remain paused. ") +
+    "I'll send the completed report when the check finishes.");
+  result.checkQueued = true;
+  return result;
+}
+
+function applyInput(original, body, owner, now = new Date(), messageSid = null) {
   const data = JSON.parse(JSON.stringify(original));
   if (data.version !== 1 || !Array.isArray(data.searches)) throw Error("Invalid control document.");
   const input = String(body || "").trim(), lower = input.toLowerCase(), today = todayIn(data.timezone,now);
   let session = data.conversations?.[owner];
   if (!session || session.expires_at <= now.getTime()) session = null;
+  if (session?.stage === "results" && /^[1-7]$/.test(lower)) session = null;
   if (/^(scan|search|status|test)(\s|$)/i.test(input)) {
     const result = applyCommand(data,input,now);
-    return saved(result.data,owner,null,result.reply);
+    const response = saved(result.data,owner,null,result.reply);
+    if (/^status\s*$/i.test(input)) {
+      response.extraReply = formatReport(response.data,now);
+      rememberReport(response,owner,now);
+    }
+    return response;
   }
-  if (["hi","hello","hey","menu","help","cancel"].includes(lower))
-    return saved(data,owner,null,(lower === "cancel" ? "Cancelled.\n" : "") + MENU);
+  if (/^check now$/i.test(input) || /^check$/i.test(input)) {
+    const result = requestedCheck(data,owner,now,messageSid);
+    result.extraReply = formatReport(result.data,now);
+    return rememberReport(result,owner,now);
+  }
+  const resultMatch = /^results(?:\s+(\d+))?$/i.exec(input);
+  if (resultMatch) {
+    const page = Number(resultMatch[1] || 1);
+    return rememberReport(saved(data,owner,null,formatReport(data,now,page)),owner,now,page);
+  }
+  if (lower === "more") {
+    if (!session || session.stage !== "results")
+      return saved(data,owner,null,"Send RESULTS to see the latest report first.");
+    if (session.report_completed_at !== (data.check_report?.completed_at || null))
+      return rememberReport(saved(data,owner,null,"A newer report arrived.\n"+formatReport(data,now)),owner,now);
+    const next = formatReport(data,now,session.page+1);
+    if (next === formatReport(data,now,session.page))
+      return saved(data,owner,session,"That is all the saved matches. Send CHECK NOW for a fresh report.");
+    return rememberReport(saved(data,owner,null,next),owner,now,session.page+1);
+  }
+  if (["hi","hello","hey","menu","help","cancel"].includes(lower)) {
+    const stopped = lower === "cancel" && cancelCheck(data);
+    return saved(data,owner,null,(lower === "cancel" ? (stopped ? "Cancelled the one-off check.\n" : "Cancelled.\n") : "") + MENU);
+  }
   if (lower === "commands") return saved(data,owner,null,HELP);
   if (lower === "back" && session) {
     if (session.stage === "add") {
@@ -233,22 +377,29 @@ function applyInput(original, body, owner, now = new Date()) {
     else if (session.stage === "field") session.stage = "action";
     else if (["value","confirm_edit"].includes(session.stage)) session.stage = "field";
     else if (session.stage === "confirm_delete") session.stage = "action";
+    else if (session.stage === "results") return saved(data,owner,null,MENU);
     session.expires_at = now.getTime()+SESSION_MS;
     return saved(data,owner,session,prompt(session,data,today));
   }
   if (!session) {
-    const aliases = {add:"add a search",searches:"my searches",pause:"pause all alerts",resume:"resume all alerts"};
-    const option = choose(aliases[lower] || lower,["add a search","my searches","pause all alerts","resume all alerts","help"]);
+    const aliases = {add:"add a search",searches:"my searches",pause:"pause all alerts",resume:"resume all alerts",results:"latest results"};
+    const option = choose(aliases[lower] || lower,["add a search","my searches","pause all alerts","resume all alerts","help","check now","latest results"]);
     if (option === 0) {
       if (data.searches.length >= 8) return saved(data,owner,null,"You have 8 searches already. Delete one first.\n"+MENU);
       session = {stage:"add",step:"from",draft:{passengers:1,mode:"snap",max:60}};
     } else if (option === 1) session = {stage:"select"};
     else if (option === 2 || option === 3) {
       data.enabled = option === 3;
+      if (!data.enabled) cancelCheck(data);
       return saved(data,owner,null,data.enabled ?
         "Alerts resumed. Active searches run on the next scheduled scan.\nSend MENU for more choices." :
         "All fare alerts paused. An in-flight check may finish.\nSend MENU for more choices.");
     } else if (option === 4) return saved(data,owner,null,MENU+"\nSend COMMANDS for older text commands. Scans run about every 15 minutes.");
+    else if (option === 5) {
+      const result = requestedCheck(data,owner,now,messageSid);
+      result.extraReply = formatReport(result.data,now);
+      return rememberReport(result,owner,now);
+    } else if (option === 6) return rememberReport(saved(data,owner,null,formatReport(data,now)),owner,now);
     else return saved(data,owner,null,(lower === "back" ? "That conversation has ended.\n" : "I didn't catch that.\n")+MENU);
     session.expires_at = now.getTime()+SESSION_MS;
     return saved(data,owner,session,prompt(session,data,today));
@@ -321,6 +472,7 @@ function applyInput(original, body, owner, now = new Date()) {
   return saved(data,owner,null,MENU);
 }
 
+
 exports.handler = async function(context, event, callback) {
   const twiml = new Twilio.twiml.MessagingResponse();
   if (event.From !== context.OWNER_WHATSAPP || event.To !== context.BOT_WHATSAPP ||
@@ -332,7 +484,7 @@ exports.handler = async function(context, event, callback) {
       const current = await document.fetch();
       if ((current.data.processed || []).includes(event.MessageSid)) return callback(null, twiml);
       let result;
-      try { result = applyInput(current.data, event.Body, event.From); }
+      try { result = applyInput(current.data, event.Body, event.From, new Date(), event.MessageSid); }
       catch (error) {
         twiml.message(error.message);
         return callback(null, twiml);
@@ -344,8 +496,11 @@ exports.handler = async function(context, event, callback) {
       }
       try {
         await document.update({ data: result.data, ifMatch: current.revision });
-        // A reply must fit WhatsApp's free-form text limit.
-        twiml.message(result.reply.slice(0, 1500));
+        let reply = result.reply;
+        if (result.checkQueued)
+          reply += "\nThe next scheduled scan can take about 15 minutes to start, plus scan time.";
+        twiml.message(reply.slice(0, 1500));
+        if (result.extraReply) twiml.message(result.extraReply.slice(0, 1500));
         return callback(null, twiml);
       } catch (error) {
         if (error.status === 412) continue;
@@ -361,4 +516,5 @@ exports.handler = async function(context, event, callback) {
 };
 exports.applyCommand = applyCommand;
 exports.applyInput = applyInput;
+exports.formatReport = formatReport;
 exports.todayIn = todayIn;

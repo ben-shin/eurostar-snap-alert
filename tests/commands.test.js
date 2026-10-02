@@ -180,3 +180,131 @@ test("legacy commands still work and interrupt an unfinished conversation", () =
   assert.match(chat.say("COMMANDS"), /SEARCH ADD/);
   assert.match(chat.say("My searches"), /Which search/);
 });
+
+const sid = (letter) => "SM" + letter.repeat(32);
+function sampleReport(state, count = 3) {
+  const search = state.searches[0];
+  const hit = (date, price) => ({
+    search_id: search.id, provider: "normal_eurostar", route: search.name,
+    date, price, currency: "GBP", departure_time: "07:56", arrival_time: "08:57",
+    duration: "2h 01m", fare_class: "Eurostar Standard",
+    booking_url: "https://www.eurostar.com/search/uk-en?outbound=" + date,
+  });
+  state.check_report = {
+    request_id: null, started_at: "2026-10-01T11:50:00Z",
+    completed_at: "2026-10-01T12:00:00Z", state: "complete",
+    attempted: count, completed: count, failed: 0,
+    hit_count: count, omitted_hits: 0,
+    searches: [{id: search.id, status: "active", settings: {...search},
+      attempted: count, completed: count, failed: 0, hit_count: count}],
+    hits: [hit("2026-10-03", 45), hit("2026-10-04", 50), hit("2026-10-05", 55)].slice(0, count),
+    errors: [],
+  };
+  return state;
+}
+test("check now queues one request without resuming paused automatic alerts", () => {
+  const state = add();
+  state.enabled = false;
+  const first = applyInput(state, "CHECK NOW", owner, now, sid("b"));
+  assert.equal(first.data.enabled, false);
+  assert.deepEqual(first.data.searches, state.searches);
+  assert.equal(first.data.check_request.id, sid("b"));
+  assert.equal(first.data.check_request.status, "queued");
+  assert.equal(first.checkQueued, true);
+  assert.match(first.reply, /Automatic alerts remain paused/);
+  const again = applyInput(first.data, "6", owner, now, sid("c"));
+  assert.equal(again.checkQueued, undefined);
+  assert.equal(again.data.check_request.id, sid("b"));
+  assert.match(again.reply, /already queued/);
+});
+test("check now with no enabled search queues nothing; stop and cancel remove requests", () => {
+  let state = initial();
+  assert.match(applyInput(state, "check now", owner, now, sid("b")).reply, /No enabled/);
+  assert.equal(state.check_request, undefined);
+  state = add();
+  state.searches[0].enabled = false;
+  assert.equal(applyInput(state, "check now", owner, now, sid("b")).data.check_request, undefined);
+  state.searches[0].enabled = true;
+  state = applyInput(state, "check now", owner, now, sid("b")).data;
+  const cancelled = applyInput(state, "CANCEL", owner, now, sid("c"));
+  assert.match(cancelled.reply, /Cancelled the one-off check/);
+  assert.equal(cancelled.data.check_request, undefined);
+  state = applyInput(cancelled.data, "check now", owner, now, sid("d")).data;
+  state = applyInput(state, "SCAN STOP", owner, now, sid("e")).data;
+  assert.equal(state.check_request, undefined);
+  state = applyInput(state, "check now", owner, now, sid("f")).data;
+  state = applyInput(state, "3", owner, now, sid("a")).data;
+  assert.equal(state.check_request, undefined);
+});
+test("latest report shows matched journey, timestamp, status and natural MORE pages", () => {
+  const state = sampleReport(add());
+  let result = applyInput(state, "7", owner, now);
+  assert.match(result.reply, /Latest fare results/);
+  assert.match(result.reply, /1 Oct 2026/);
+  assert.match(result.reply, /Showing 1-2 of 3 saved matches/);
+  assert.match(result.reply, /£45/);
+  assert.match(result.reply, /Eurostar Standard/);
+  assert.match(result.reply, /Dep 07:56 \/ Arr 08:57/);
+  assert.match(result.reply, /https:\/\/www.eurostar.com/);
+  assert.match(result.reply, /Reply MORE/);
+  result = applyInput(result.data, "MORE", owner, now);
+  assert.match(result.reply, /Showing 3-3 of 3 saved matches/);
+  assert.match(result.reply, /£55/);
+  assert.doesNotMatch(result.reply, /£45/);
+  assert.match(applyInput(result.data, "MORE", owner, now).reply, /all the saved matches/);
+  const settings = applyInput(state, "STATUS", owner, now);
+  assert.match(settings.reply, /Scanning ON/);
+  assert.match(settings.extraReply, /Latest fare results/);
+});
+test("changed, paused and expired searches cannot masquerade as current hits", () => {
+  let state = sampleReport(add(), 1);
+  state.searches[0].max = 20;
+  assert.match(applyInput(state, "RESULTS", owner, now).reply, /no longer fit current searches/);
+  assert.match(applyInput(state, "RESULTS", owner, now).reply, /No current matches/);
+  state = sampleReport(add(), 1);
+  state.enabled = false;
+  assert.match(applyInput(state, "RESULTS", owner, now).reply, /Cached results while automatic alerts are paused/);
+  state.searches[0].end_date = "2026-09-30";
+  assert.match(applyInput(state, "RESULTS", owner, now).reply, /expired/);
+  assert.match(applyInput(state, "RESULTS", owner, now).reply, /No current matches/);
+});
+test("partial results and storage omissions are disclosed rather than called clear", () => {
+  const state = sampleReport(add(), 0);
+  state.check_report.state = "partial";
+  state.check_report.attempted = 2;
+  state.check_report.completed = 1;
+  state.check_report.failed = 1;
+  state.check_report.hit_count = 4;
+  state.check_report.omitted_hits = 4;
+  const reply = applyInput(state, "RESULTS", owner, now).reply;
+  assert.match(reply, /Partial: 1\/2 checks completed; 1 failed/);
+  assert.match(reply, /No confirmed matches in completed checks/);
+  assert.match(reply, /4 more match\(es\) omitted/);
+});
+test("webhook queues one request, acknowledges schedule, and deduplicates retries", async () => {
+  global.Twilio = {twiml: {MessagingResponse: class {
+    constructor(){this.messages=[];} message(x){this.messages.push(x);}
+  }}};
+  let data = add(), revision = 0, writes = 0;
+  const document = {
+    fetch: async () => ({data, revision: String(revision)}),
+    update: async ({data: next, ifMatch}) => {
+      assert.equal(ifMatch, String(revision));
+      data = next; revision++; writes++;
+    },
+  };
+  const context = {
+    OWNER_WHATSAPP: owner, BOT_WHATSAPP: "whatsapp:+10000000000", SYNC_SERVICE_SID: "ISfake",
+    getTwilioClient: () => ({sync:{v1:{services: () => ({documents: () => document})}}}),
+  };
+  const invoke = (e) => new Promise((resolve, reject) =>
+    handler(context, e, (err, value) => err ? reject(err) : resolve(value)));
+  const event = {From: owner, To: context.BOT_WHATSAPP, MessageSid: sid("b"), Body: "CHECK NOW"};
+  const reply = await invoke(event);
+  assert.match(reply.messages[0], /next scheduled scan can take about 15 minutes/);
+  assert.match(reply.messages[1], /Latest fare results/);
+  assert.equal(data.check_request.id, sid("b"));
+  assert.equal(writes, 1);
+  assert.equal((await invoke(event)).messages.length, 0);
+  assert.equal(writes, 1);
+});

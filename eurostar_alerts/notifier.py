@@ -127,3 +127,12 @@ def send_whatsapp_hits(config: NotificationConfig, hits: Iterable[FareHit], stat
         else:
             # Keep the SID: a later scan checks this message instead of sending a duplicate.
             print(f"WhatsApp delivery still {message.status}; saved pending message for next run.")
+
+
+
+def send_check_report(config: NotificationConfig, report: dict) -> None:
+    """Send a completion report for an explicitly requested fresh scan."""
+    from .status_report import format_check_report
+
+    client, from_number, to_number = twilio_client(config)
+    client.messages.create(body=format_check_report(report), from_=from_number, to=to_number)
