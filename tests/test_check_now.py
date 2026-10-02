@@ -2,12 +2,23 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import pytest
+
 
 from eurostar_alerts import main
 from eurostar_alerts.config import load_config
 from eurostar_alerts.control import ControlStore, effective_configs, seed_controls
 from eurostar_alerts.models import CheckOutcome, CheckStatus, FareHit, Provider, ScrapeReport
 from eurostar_alerts.status_report import format_check_report, make_check_report
+
+
+@pytest.fixture(autouse=True)
+def prepared_attempt(monkeypatch):
+    monkeypatch.setattr(main, "prepare_check_report", lambda _, report: {
+        "request_id": report["request_id"], "body": format_check_report(report),
+        "from": "whatsapp:+100", "to": "whatsapp:+200",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 class Document:
@@ -171,7 +182,7 @@ def test_zero_hit_report_marks_changed_threshold_and_new_search():
     added["id"] = "s3"
     data["searches"].append(added)
     store = store_with(data)
-    assert not store.publish_report(snapshot)
+    assert store.publish_report(snapshot)
     assert snapshot["coverage_changed"]
     assert snapshot["state"] == "partial"
     assert any("s3" in note for note in snapshot["coverage_notes"])
@@ -193,7 +204,7 @@ def test_publication_suppresses_hit_after_midscan_edit_or_pause():
         snapshot = make_check_report(data, [(search, run)], request_id=None,
                                      started_at=datetime.now(timezone.utc).isoformat())
         store = store_with(changed)
-        assert not store.publish_report(snapshot)
+        assert store.publish_report(snapshot)
         assert snapshot["coverage_changed"]
         assert snapshot["state"] == "partial"
         assert snapshot["hit_count"] == 0
@@ -215,7 +226,7 @@ def test_interrupted_before_first_date_is_not_a_clear_or_booking_window_result()
 
 def test_completion_create_failure_retries_saved_report_without_rescan(monkeypatch):
     store, request_id = _ready_delivery_store()
-    failed_create = MagicMock(side_effect=RuntimeError("Twilio unavailable"))
+    failed_create = MagicMock(side_effect=main.CheckReportRejected("Twilio rejected creation"))
     monkeypatch.setattr(main, "send_check_report", failed_create)
     try:
         main._advance_check_delivery(store, store.config.notification)
@@ -322,7 +333,156 @@ def test_snapshot_only_keeps_valid_hits_while_automatic_alerts_are_paused():
                                  started_at=datetime.now(timezone.utc).isoformat(),
                                  manual_snapshot=True)
     store = store_with(data)
-    assert not store.publish_report(snapshot)
+    assert store.publish_report(snapshot)
     assert snapshot["hit_count"] == 1
     assert len(snapshot["hits"]) == 1
     assert data["enabled"] is False
+
+
+def test_created_message_is_reconciled_after_sid_persistence_failure(monkeypatch):
+    store, request_id = _ready_delivery_store()
+    message = SimpleNamespace(sid="SM" + "1" * 32, status="queued")
+    def accepted(_config, attempt):
+        persisted = store.document.data["check_request"]
+        assert persisted["status"] == "sending"
+        assert persisted["attempt"] == attempt
+        return message
+    create = MagicMock(side_effect=accepted)
+    monkeypatch.setattr(main, "send_check_report", create)
+    original_update = store.update_delivery
+    def lost_write(*args, **kwargs):
+        raise RuntimeError("Sync write unavailable after create succeeded")
+    monkeypatch.setattr(store, "update_delivery", lost_write)
+    with pytest.raises(RuntimeError, match="Sync write"):
+        main._advance_check_delivery(store, store.config.notification)
+    assert store.document.data["check_request"]["status"] == "sending"
+    attempted_body = store.document.data["check_request"]["attempt"]["body"]
+    monkeypatch.setattr(store, "update_delivery", original_update)
+    reconcile = MagicMock(return_value=message)
+    monkeypatch.setattr(main, "reconcile_check_report", reconcile)
+    main._advance_check_delivery(store, store.config.notification)
+    assert create.call_count == 1
+    assert reconcile.call_args.args[1]["body"] == attempted_body
+    assert store.document.data["check_request"]["pending_sid"] == message.sid
+    assert store.document.data["check_request"]["status"] == "delivery_pending"
+
+
+def test_ambiguous_create_never_blindly_retries(monkeypatch):
+    store, request_id = _ready_delivery_store()
+    create = MagicMock(side_effect=TimeoutError("response lost"))
+    monkeypatch.setattr(main, "send_check_report", create)
+    with pytest.raises(RuntimeError, match="outcome uncertain"):
+        main._advance_check_delivery(store, store.config.notification)
+    assert store.document.data["check_request"]["status"] == "sending"
+    reconcile = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "reconcile_check_report", reconcile)
+    with pytest.raises(RuntimeError, match="nothing was resent"):
+        main._advance_check_delivery(store, store.config.notification)
+    assert create.call_count == 1
+    assert store.document.data["check_request"]["status"] == "sending"
+    reconcile.return_value = SimpleNamespace(sid="SM" + "2" * 32, status="read")
+    main._advance_check_delivery(store, store.config.notification)
+    assert create.call_count == 1
+    assert store.document.data["check_request"]["status"] == "delivered"
+
+
+@pytest.mark.parametrize("previous", ["report_ready", "sending", "delivery_pending"])
+def test_cancelled_delivery_stops_every_later_worker_action(monkeypatch, previous):
+    store, request_id = _ready_delivery_store()
+    store.document.data["check_request"].update(status="cancelled", cancelled_after=previous,
+                                               attempt={"body": "preserved"}, pending_sid="SMold")
+    create, reconcile, status = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(main, "send_check_report", create)
+    monkeypatch.setattr(main, "reconcile_check_report", reconcile)
+    monkeypatch.setattr(main, "check_report_delivery_status", status)
+    main._advance_check_delivery(store, store.config.notification)
+    create.assert_not_called()
+    reconcile.assert_not_called()
+    status.assert_not_called()
+    assert store.document.data["check_request"]["attempt"]["body"] == "preserved"
+
+
+def test_cancel_after_claim_but_before_create_suppresses_unsent_message(monkeypatch):
+    store, request_id = _ready_delivery_store()
+    original_begin = store.begin_delivery
+    def cancel_after_claim(*args):
+        assert original_begin(*args)
+        store.document.data["check_request"]["status"] = "cancelled"
+        return True
+    monkeypatch.setattr(store, "begin_delivery", cancel_after_claim)
+    create = MagicMock()
+    monkeypatch.setattr(main, "send_check_report", create)
+    main._advance_check_delivery(store, store.config.notification)
+    create.assert_not_called()
+
+
+def test_snapshot_only_zero_eligible_publishes_honest_paused_report(monkeypatch, tmp_path):
+    data = seed_controls(load_config("config.yml"))
+    data["enabled"] = False
+    for search in data["searches"]:
+        search["enabled"] = False
+    store = store_with(data)
+    metadata = tmp_path / "connection.json"
+    metadata.write_text("{}")
+    monkeypatch.setattr(main, "ControlStore", lambda *args: store)
+    scan, send = MagicMock(), MagicMock()
+    monkeypatch.setattr(main, "run_with_browser", scan)
+    monkeypatch.setattr(main, "send_check_report", send)
+    state = tmp_path / "state.json"
+    assert main.main(["--controls", str(metadata), "--snapshot-only", "--state", str(state),
+                      "--report", str(tmp_path / "report.json")]) == 0
+    report = store.document.data["check_report"]
+    assert report["state"] == "paused"
+    assert report["attempted"] == report["hit_count"] == 0
+    assert report["manual_snapshot"] is True
+    assert store.document.data["enabled"] is False
+    assert not state.exists()
+    scan.assert_not_called()
+    send.assert_not_called()
+
+
+def test_snapshot_only_rejected_publication_is_not_success(monkeypatch, tmp_path, capsys):
+    store, _ = _ready_delivery_store()
+    for search in store.document.data["searches"]:
+        search["enabled"] = False
+    before = deepcopy(store.document.data["check_report"])
+    metadata = tmp_path / "connection.json"
+    metadata.write_text("{}")
+    monkeypatch.setattr(main, "ControlStore", lambda *args: store)
+    with pytest.raises(RuntimeError, match="snapshot was not published"):
+        main.main(["--controls", str(metadata), "--snapshot-only", "--report", str(tmp_path / "report.json")])
+    assert store.document.data["check_report"] == before
+    assert "Results snapshot published" not in capsys.readouterr().out
+
+
+def test_durable_attempt_keeps_exact_unicode_body_within_sync_limit():
+    import json
+    store, request_id = _ready_delivery_store()
+    report = store.document.data["check_report"]
+    record = next(search for search in report["searches"] if search["status"] == "active")
+    record["hit_count"] = report["hit_count"] = 1
+    report["hits"] = [{"search_id": record["id"], "booking_url": "x" * 9000}]
+    attempt = {"request_id": request_id, "body": "旅" * 2000,
+               "from": "whatsapp:+100", "to": "whatsapp:+200",
+               "started_at": datetime.now(timezone.utc).isoformat()}
+    assert store.begin_delivery(request_id, deepcopy(report), attempt)
+    assert len(json.dumps(store.document.data).encode("utf-8")) <= 16_000
+    assert store.document.data["check_request"]["attempt"]["body"] == "旅" * 2000
+    assert store.document.data["check_report"]["omitted_hits"] == 1
+
+
+def test_history_reconciliation_includes_queued_messages_and_matches_exact_attempt(monkeypatch):
+    from eurostar_alerts import notifier
+    now = datetime.now(timezone.utc)
+    attempt = {"request_id": "SMrequest", "body": "exact attempted report", "from": "whatsapp:+100",
+               "to": "whatsapp:+200", "started_at": now.isoformat(), "failed_sids": ["SMfailed"]}
+    queued = SimpleNamespace(sid="SMqueued", status="queued", body=attempt["body"],
+                             from_=attempt["from"], to=attempt["to"], date_created=now, date_sent=None)
+    wrong_to = SimpleNamespace(**{**vars(queued), "sid": "SMother", "to": "whatsapp:+300"})
+    old = SimpleNamespace(**{**vars(queued), "sid": "SMold", "date_created": now - timedelta(days=1)})
+    failed = SimpleNamespace(**{**vars(queued), "sid": "SMfailed", "status": "failed"})
+    client = MagicMock()
+    client.messages.list.return_value = [wrong_to, old, failed, queued]
+    monkeypatch.setattr(notifier, "twilio_client", lambda _: (client, attempt["from"], attempt["to"]))
+    assert notifier.reconcile_check_report(load_config("config.yml").notification, attempt) is queued
+    client.messages.list.assert_called_once_with(from_=attempt["from"], to=attempt["to"], limit=200)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from .config import NotificationConfig
@@ -130,12 +131,61 @@ def send_whatsapp_hits(config: NotificationConfig, hits: Iterable[FareHit], stat
 
 
 
-def send_check_report(config: NotificationConfig, report: dict):
-    """Create the request-keyed completion message; caller persists its SID."""
+class CheckReportRejected(RuntimeError):
+    """Twilio explicitly rejected creation; retry cannot duplicate that attempt."""
+
+
+def prepare_check_report(config: NotificationConfig, report: dict) -> dict:
     from .status_report import format_check_report
 
+    _, from_number, to_number = twilio_client(config)
+    # Keep the full scan timestamp, including its subsecond precision, in the
+    # exact body used for request-specific reconciliation. No internal SID is shown.
+    body = format_check_report(report)
+    first_line = "Eurostar check finished " + report["completed_at"].replace("T", " ")
+    body = first_line + "\n" + body.split("\n", 1)[1]
+    return {"request_id": report["request_id"], "body": body,
+            "from": from_number, "to": to_number,
+            "started_at": datetime.now(timezone.utc).isoformat()}
+
+
+def send_check_report(config: NotificationConfig, attempt: dict):
+    """Send only a previously persisted exact attempt."""
+    from twilio.base.exceptions import TwilioRestException
+
     client, from_number, to_number = twilio_client(config)
-    return client.messages.create(body=format_check_report(report), from_=from_number, to=to_number)
+    if attempt["from"] != from_number or attempt["to"] != to_number:
+        raise RuntimeError("Completion recipients changed; delivery requires reconciliation")
+    try:
+        return client.messages.create(body=attempt["body"], from_=from_number, to=to_number)
+    except TwilioRestException as exc:
+        if exc.status in {400, 401, 403, 404, 405, 413, 422, 429}:
+            raise CheckReportRejected("Twilio rejected completion creation") from None
+        raise
+
+
+def reconcile_check_report(config: NotificationConfig, attempt: dict):
+    """Find an accepted send, including queued messages without date_sent.
+
+    An empty or truncated history is not proof of non-creation. The caller must
+    retain the uncertain attempt rather than send it again.
+    """
+    client, _, _ = twilio_client(config)
+    started = datetime.fromisoformat(attempt["started_at"])
+    if started.tzinfo is None:
+        raise RuntimeError("Completion attempt has no timezone; cannot reconcile safely")
+    matches = []
+    for message in client.messages.list(from_=attempt["from"], to=attempt["to"], limit=200):
+        created = message.date_created
+        if (message.sid not in attempt.get("failed_sids", [])
+                and message.body == attempt["body"] and message.from_ == attempt["from"]
+                and message.to == attempt["to"] and created is not None
+                and created.tzinfo is not None
+                and started - timedelta(seconds=5) <= created <= started + timedelta(minutes=5)):
+            matches.append(message)
+    if len(matches) > 1:
+        raise RuntimeError("Multiple completion messages matched; delivery needs manual review")
+    return matches[0] if matches else None
 
 
 def check_report_delivery_status(config: NotificationConfig, sid: str) -> str:

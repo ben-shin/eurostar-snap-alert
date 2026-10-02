@@ -153,7 +153,7 @@ class ControlStore:
             request = current.data.get("check_request") or {}
             if request_id and (request.get("id") != request_id or request.get("status") != "running"):
                 return False
-            if not request_id and request.get("status") in {"report_ready", "delivery_pending"}:
+            if not request_id and request.get("status") in {"report_ready", "sending", "delivery_pending"}:
                 return False  # Preserve the one outstanding delivery and its saved report.
             updated = deepcopy(current.data)
             updated["check_report"] = deepcopy(report)
@@ -174,7 +174,7 @@ class ControlStore:
                 self.document.update(data=updated, if_match=current.revision)
                 report.clear()
                 report.update(snapshot)
-                return bool(request_id)
+                return True
             except Exception as exc:
                 if getattr(exc, "status", None) != 412:
                     raise
@@ -201,11 +201,43 @@ class ControlStore:
         data = self.read()
         request = data.get("check_request") or {}
         report = data.get("check_report") or {}
-        if request.get("status") not in {"report_ready", "delivery_pending"}:
+        if request.get("status") not in {"report_ready", "sending", "delivery_pending"}:
             return None
         if report.get("request_id") != request.get("id"):
             raise RuntimeError("Completion report does not match pending request")
         return request, report
+
+    def begin_delivery(self, request_id: str, report: dict, attempt: dict) -> bool:
+        """Persist the exact send before contacting Twilio; only one worker wins."""
+        for _ in range(3):
+            current = self.document.fetch()
+            request = current.data.get("check_request") or {}
+            if request.get("id") != request_id or request.get("status") != "report_ready":
+                return False
+            checked = deepcopy(current.data.get("check_report") or {})
+            _revalidate_report(checked, current.data)
+            if checked != report or attempt.get("request_id") != request_id:
+                return False
+            updated = deepcopy(current.data)
+            updated["check_request"] = {**request, "status": "sending", "attempt": deepcopy(attempt)}
+            snapshot = updated["check_report"]
+            # Count JSON escapes too: the SDK may serialize non-ASCII as \uXXXX.
+            while len(json.dumps(updated).encode("utf-8")) > 16_000:
+                if snapshot["hits"]:
+                    snapshot["hits"].pop()
+                    snapshot["omitted_hits"] += 1
+                elif snapshot["errors"]:
+                    snapshot["errors"].pop()
+                    snapshot["omitted_errors"] += 1
+                else:
+                    raise RuntimeError("Completion attempt exceeds Sync storage limit; nothing sent")
+            try:
+                self.document.update(data=updated, if_match=current.revision)
+                return True
+            except Exception as exc:
+                if getattr(exc, "status", None) != 412:
+                    raise
+        raise RuntimeError("Could not record completion attempt after concurrent control updates")
 
     def update_delivery(self, request_id: str, expected_status: str, status: str,
                         *, pending_sid: str | None = None) -> bool:
@@ -216,6 +248,10 @@ class ControlStore:
                 return False
             updated = deepcopy(current.data)
             next_request = {**request, "status": status}
+            if expected_status == "delivery_pending" and status == "report_ready":
+                next_request["failed_sids"] = (
+                    request.get("failed_sids", []) + [request["pending_sid"]]
+                )[-20:]
             if pending_sid:
                 next_request["pending_sid"] = pending_sid
             elif status != "delivery_pending":
@@ -236,7 +272,7 @@ class ControlStore:
             request = current.data.get("check_request") or {}
             report = current.data.get("check_report") or {}
             if (request.get("id") != request_id
-                    or request.get("status") not in {"report_ready", "delivery_pending"}
+                    or request.get("status") not in {"report_ready", "sending", "delivery_pending"}
                     or report.get("request_id") != request_id):
                 return None
             updated = deepcopy(current.data)

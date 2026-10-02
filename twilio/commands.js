@@ -215,9 +215,15 @@ function activeSearches(data, today) {
   return data.searches.filter((search) => search.enabled && search.end_date >= today);
 }
 function cancelCheck(data) {
-  if (data.check_request && ["queued", "running"].includes(data.check_request.status)) {
+  const request = data.check_request;
+  if (request && ["queued", "running"].includes(request.status)) {
     delete data.check_request;
-    return true;
+    return "unsent";
+  }
+  if (request && ["report_ready", "sending", "delivery_pending"].includes(request.status)) {
+    const previous = request.status;
+    data.check_request = {...request, status:"cancelled", cancelled_after:previous};
+    return previous === "report_ready" ? "unsent" : "inflight";
   }
   return false;
 }
@@ -265,6 +271,10 @@ function formatReport(data, now = new Date(), page = 1) {
   const pending = data.check_request;
   if (pending && ["queued", "running"].includes(pending.status))
     lines.push("One-off check " + pending.status + " since " + reportTime(pending.requested_at, data.timezone, now) + ".");
+  else if (pending?.status === "sending")
+    lines.push("Checking whether your report was sent. It will not be resent while delivery is uncertain. Send CANCEL to stop further delivery actions.");
+  else if (pending?.status === "cancelled")
+    lines.push("Requested report cancelled; no further delivery attempts. An already in-flight message may still arrive.");
   else if (pending && ["report_ready", "delivery_pending"].includes(pending.status))
     lines.push("Your requested report is ready; delivery is being checked.");
   if (!report) return lines.join("\n") +
@@ -352,8 +362,8 @@ function requestedCheck(data, owner, now, messageSid) {
   const previous = data.check_request;
   if (!active.length) return saved(data, owner, null,
     "No enabled, unexpired searches to check. Your settings are unchanged.");
-  if (previous && ["queued", "running", "report_ready", "delivery_pending"].includes(previous.status))
-    return saved(data, owner, null, ["report_ready", "delivery_pending"].includes(previous.status) ?
+  if (previous && ["queued", "running", "report_ready", "sending", "delivery_pending"].includes(previous.status))
+    return saved(data, owner, null, ["report_ready", "sending", "delivery_pending"].includes(previous.status) ?
       "Your last check has finished and its report is awaiting delivery. No second scan was queued." :
       "A one-off check is already " + previous.status +
       " since " + reportTime(previous.requested_at, data.timezone, now) + ". No second scan was queued.");
@@ -406,7 +416,7 @@ function applyInput(original, body, owner, now = new Date(), messageSid = null) 
   }
   if (["hi","hello","hey","menu","help","cancel"].includes(lower)) {
     const stopped = lower === "cancel" && cancelCheck(data);
-    return saved(data,owner,null,(lower === "cancel" ? (stopped ? "Cancelled the one-off check.\n" : "Cancelled.\n") : "") + MENU);
+    return saved(data,owner,null,(lower === "cancel" ? (stopped === "inflight" ? "Cancelled further delivery attempts. A message already in-flight may still arrive.\n" : stopped ? "Cancelled the one-off check and any unsent report.\n" : "Cancelled.\n") : "") + MENU);
   }
   if (lower === "commands") return saved(data,owner,null,HELP);
   if (lower === "back" && session) {

@@ -353,15 +353,21 @@ test("mixed success lists failed route and date without exposing backend error t
   assert.match(result.reply, /2026-10-08: check failed/);
   assert.doesNotMatch(result.reply, /secret token|private debug|internal URL/);
 });
-test("report delivery pending cannot be overwritten or cancelled", () => {
-  for (const status of ["report_ready", "delivery_pending"]) {
+test("cancel suppresses unsent reports and warns for already in-flight sends", () => {
+  for (const status of ["report_ready", "sending", "delivery_pending"]) {
     const state = add();
-    state.check_request = {id:sid("b"),requested_at:now.toISOString(),status};
+    state.check_request = {id:sid("b"),requested_at:now.toISOString(),status,
+      attempt:{body:"exact report"},pending_sid:sid("d")};
     const queued = applyInput(state, "CHECK NOW", owner, now, sid("c"));
     assert.match(queued.reply, /awaiting delivery/);
-    assert.equal(queued.data.check_request.id, sid("b"));
     assert.equal(queued.checkQueued, undefined);
-    assert.equal(applyInput(state, "CANCEL", owner, now).data.check_request.status, status);
-    assert.equal(applyInput(state, "SCAN STOP", owner, now).data.check_request.status, status);
+    if (status === "sending") assert.match(queued.extraReply, /will not be resent while delivery is uncertain/);
+    const cancelled = applyInput(state, "CANCEL", owner, now);
+    assert.equal(cancelled.data.check_request.status, "cancelled");
+    assert.equal(cancelled.data.check_request.cancelled_after, status);
+    assert.equal(cancelled.data.check_request.attempt.body, "exact report");
+    assert.equal(cancelled.data.check_request.pending_sid, sid("d"));
+    assert.match(cancelled.reply, status === "report_ready" ? /unsent report/ : /already in-flight may still arrive/);
+    assert.equal(applyInput(state, "SCAN STOP", owner, now).data.check_request.status, "cancelled");
   }
 });

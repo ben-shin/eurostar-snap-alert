@@ -10,7 +10,8 @@ from .config import load_config
 from .control import ControlStore, effective_configs
 from .models import CheckOutcome, CheckStatus, Provider, ScrapeReport
 from .notifier import (
-    check_report_delivery_status, restore_failed_alerts, send_check_report, send_whatsapp_hits,
+    CheckReportRejected, check_report_delivery_status, prepare_check_report,
+    reconcile_check_report, restore_failed_alerts, send_check_report, send_whatsapp_hits,
 )
 from .scrapers import run_with_browser
 from .state import AlertState
@@ -23,22 +24,45 @@ def _advance_check_delivery(control: ControlStore, notification) -> None:
         return
     request, _ = pending
     request_id = request["id"]
-    report = control.revalidate_delivery_report(request_id)
-    if report is None:
-        return
     if request["status"] == "report_ready":
-        # A definite create failure leaves report_ready intact for the next run.
-        message = send_check_report(notification, report)
-        if not control.update_delivery(request_id, "report_ready", "delivery_pending",
-                                       pending_sid=message.sid):
+        report = control.revalidate_delivery_report(request_id)
+        if report is None:
+            return
+        attempt = prepare_check_report(notification, report)
+        attempt["failed_sids"] = request.get("failed_sids", [])
+        if not control.begin_delivery(request_id, report, attempt):
+            return
+        # CANCEL may have arrived after the durable claim. From this point an
+        # in-flight message can still arrive, but no later retry may send again.
+        current = control.delivery_state()
+        if current is None or current[0].get("attempt") != attempt:
+            return
+        try:
+            message = send_check_report(notification, attempt)
+        except CheckReportRejected:
+            control.update_delivery(request_id, "sending", "report_ready")
+            raise
+        except Exception:
+            raise RuntimeError("Completion send outcome uncertain; saved attempt will be reconciled, not resent") from None
+        expected = "sending"
+    elif request["status"] == "sending":
+        # A worker may have died after create succeeded but before its SID was
+        # saved. Never create again while that outcome remains uncertain.
+        message = reconcile_check_report(notification, request["attempt"])
+        if message is None:
+            raise RuntimeError("Completion delivery remains uncertain; no matching message found, so nothing was resent")
+        expected = "sending"
+    else:
+        status = check_report_delivery_status(notification, request["pending_sid"])
+        message = None
+    if message is not None:
+        if not control.update_delivery(request_id, expected, "delivery_pending", pending_sid=message.sid):
             return
         status = message.status
-    else:
-        # Never create another message while the saved SID is still pending.
-        status = check_report_delivery_status(notification, request["pending_sid"])
     if status in {"delivered", "read"}:
         control.update_delivery(request_id, "delivery_pending", "delivered")
     elif status in {"failed", "undelivered"}:
+        # The provider has positively confirmed this SID did not deliver.
         control.update_delivery(request_id, "delivery_pending", "report_ready")
 
 
@@ -64,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     control = None
     request_id = None
     hit_searches = {}
+    snapshot_published = False
     started_at = datetime.now(timezone.utc).isoformat()
     if Path(args.controls).exists() and not args.local_config:
         control = ControlStore(config, args.controls)
@@ -109,12 +134,16 @@ def main(argv: list[str] | None = None) -> int:
             print("Scanning is paused or all searches are paused/expired; no browser started.")
         # A skipped automatic run must retain the previous actual results. A
         # one-off request with no eligible searches gets an explicit paused report.
-        if not args.dry_run and (searches or request_id):
+        if not args.dry_run and (searches or request_id or args.snapshot_only):
             snapshot = make_check_report(
                 controls, runs, request_id=request_id, started_at=started_at,
                 interrupted_ids=interrupted_ids, manual_snapshot=args.snapshot_only,
             )
-            control.publish_report(snapshot, request_id)
+            snapshot_published = control.publish_report(snapshot, request_id)
+            if not snapshot_published:
+                if args.snapshot_only:
+                    raise RuntimeError("Results snapshot was not published: an outstanding report delivery was preserved")
+                print("Latest results were not published; the current request/report was preserved.")
     else:
         report = run_with_browser(config)
     report_path = Path(args.report)
@@ -125,7 +154,8 @@ def main(argv: list[str] | None = None) -> int:
 
     hits = list({hit.dedupe_key: hit for hit in report.hits}.values())
     if request_id:
-        print("One-off check completed; alert dedupe state left unchanged.")
+        print("One-off check finished; report " + ("published" if snapshot_published else "not published")
+              + "; alert dedupe state left unchanged.")
         return 1 if report.failures else 0
     if args.snapshot_only:
         print("Results snapshot published; no WhatsApp messages or alert-state changes.")
